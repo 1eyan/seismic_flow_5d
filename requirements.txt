@@ -9,3 +9,4 @@ matplotlib>=3.5
 segyio>=1.9
 tqdm>=4.60
 tensorboard>=2.10
+pyyaml>=6.0

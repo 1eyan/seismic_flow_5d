@@ -827,7 +827,7 @@ def _compute_starts(n: int, block_n: int, stride_n: int) -> List[int]:
     if block_n <= 0 or stride_n <= 0:
         raise ValueError("block size and stride must be positive")
     if stride_n > block_n:
-        raise ValueError("stride must be <= block size")
+        stride_n = block_n  # clamp: ensure full coverage without gaps
 
     if n <= block_n:
         return [0]
@@ -1837,6 +1837,8 @@ def precompute_infer_patches_2d(
     grid_query_mask: Optional[ArrayLike] = None,
     require_full_query_coverage: bool = False,
     obs_valid_mask: Optional[ArrayLike] = None,
+    use_gpu: bool = False,
+    gpu_device: Optional[str] = None,
 ) -> Dict[str, np.ndarray]:
     """Precompute inference patch indices and save as 2D arrays.
 
@@ -1884,7 +1886,8 @@ def precompute_infer_patches_2d(
         metric_weights=metric_weights,
         beta=beta,
         obs_valid_mask=ovm,
-        use_gpu=False,
+        use_gpu=use_gpu,
+        gpu_device=gpu_device,
     )
 
     patch_list: List[np.ndarray] = []

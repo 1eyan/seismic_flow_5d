@@ -1,0 +1,48 @@
+# SEG-Y header byte position configurations for different datasets.
+# Each preset defines the 1-based byte positions of trace header fields.
+#
+# Usage:
+#   from config.segy_config import load_config, get_byte_pos
+#   load_config("field1031")            # select dataset
+#   bp = get_byte_pos()                 # get active byte_pos dict
+#
+#   # Or override active preset via env:  SEGY_CONFIG=field1031 python train.py
+
+field1031:
+  shot_line: 17
+  shot_no: 25
+  recv_line: 61
+  recv_stake: 65
+  shot_x: 73
+  shot_y: 77
+  rec_x: 81
+  rec_y: 85
+  shot_stake: 21
+  recv_no: 41
+  cmp: 193
+  cmp_line: 189
+  offset: 37
+
+sw06:
+  shot_line: 221
+  shot_no: 25
+  recv_line: 61
+  recv_stake: 229
+  shot_x: 73
+  shot_y: 77
+  rec_x: 81
+  rec_y: 85
+  shot_stake: 225
+  recv_no: 65
+  cmp: 193
+  cmp_line: 189
+  offset: 37
+
+# Self-computed mode (coordinate-only, for segc3 data series)
+# In this mode, shot_line/shot_stake/recv_line/recv_stake are not read
+# from headers but computed from scaled coordinates.
+segc3:
+  shot_x: 73
+  shot_y: 77
+  rec_x: 81
+  rec_y: 85

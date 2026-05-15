@@ -8,7 +8,7 @@ Provides a self-contained PyTorch Dataset that:
 
 Dependencies:
     numpy, h5py, torch
-    queryctx_module.sampler_utils (diverse_topk, parse_metric_weights, weighted_sqdist_to_one)
+    queryctx_module.utils.sampler_utils (diverse_topk, parse_metric_weights, weighted_sqdist_to_one)
 """
 
 from typing import Any, Dict, Optional, Tuple
@@ -16,14 +16,19 @@ import numpy as np
 from h5py import File
 
 try:
-    from .sampler_utils import diverse_topk
+    from ..utils.sampler_utils import diverse_topk
 except ImportError:
-    from queryctx_module.sampler_utils import diverse_topk
+    from queryctx_module.utils.sampler_utils import diverse_topk
 
 try:
-    from .config import object_args as _default_args
+    from ..config.data_config import object_args as _default_args
 except ImportError:
-    from queryctx_module.config import object_args as _default_args
+    from queryctx_module.config.data_config import object_args as _default_args
+
+try:
+    from ..config.segy_config import COORD_COL as _COORD_COL, TRACE_SORT_KEYS
+except ImportError:
+    from config.segy_config import COORD_COL as _COORD_COL, TRACE_SORT_KEYS
 
 
 def amplitude_metadata(thres: float, clip_percentile: float = 99.5) -> Dict[str, Any]:
@@ -51,7 +56,7 @@ class DatasetH5_all_queryctx:
         patch_mode: "train_pool" or "infer_query_context"
     """
 
-    _COORD_COL = {"sx": 0, "sy": 1, "rx": 2, "ry": 3}
+    _COORD_COL = _COORD_COL  # from segy_config
 
     def __init__(
         self,
@@ -65,7 +70,7 @@ class DatasetH5_all_queryctx:
         patch_beta: float = 0.3,
         patch_metric_weights=None,
         force_anchor_query: bool = False,
-        trace_sort_keys: Tuple[str, ...] = ("rx", "ry", "sx", "sy"),
+        trace_sort_keys: Tuple[str, ...] = TRACE_SORT_KEYS,
         use_p_scale: bool = False,
         time_ps: int = 1256,
         trace_ps: int = 128,

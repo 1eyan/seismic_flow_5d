@@ -20,24 +20,14 @@ import numpy as np
 import segyio
 
 # ---- Byte positions for SEG-Y headers ----
-# Adjust KEY_COLUMNS and SEGY_BYTE_POS for your data format
-KEY_COLUMNS = ("shot_line", "shot_stake", "recv_line", "recv_stake")
+# Loaded from segy_config (YAML-based). To switch datasets:
+#     segy_config.load_config("field1031")   or   segy_config.load_config("segc3")
+try:
+    from ..config.segy_config import get_byte_pos, KEY_COLUMNS
+except ImportError:
+    from config.segy_config import get_byte_pos, KEY_COLUMNS
 
-SEGY_BYTE_POS = {
-    "shot_line": 17,
-    "shot_no": 25,
-    "recv_line": 61,
-    "recv_stake": 65,
-    "shot_x": 73,
-    "shot_y": 77,
-    "rec_x": 81,
-    "rec_y": 85,
-    "shot_stake": 21,
-    "recv_no": 41,
-    "cmp": 193,
-    "cmp_line": 189,
-    "offset": 37,
-}
+SEGY_BYTE_POS = get_byte_pos()
 
 
 def i32be(buf: bytes, pos_1b: int) -> int:

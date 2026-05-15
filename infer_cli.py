@@ -32,16 +32,21 @@ import torch
 import torch.distributed as dist
 
 from .dataset import DatasetH5_all_queryctx
-from .coord_utils import build_coord_config
+from .utils import build_coord_config
 from .model import SeisDiTRopeV2
 from .fpm import FlowMatchingModel
 from .infer import run_queryctx_inference, add_prediction, fit_trace
-from .segy_utils import (
+from .utils import (
     read_segy_headers,
     read_segy_data,
     write_segy_data,
     build_lookup,
 )
+
+try:
+    from .config.segy_config import KEY_COLUMNS
+except ImportError:
+    from config.segy_config import KEY_COLUMNS
 
 try:
     from tqdm import tqdm
@@ -53,9 +58,6 @@ except Exception:
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-KEY_COLUMNS = ("shot_line", "shot_stake", "recv_line", "recv_stake")
-
 
 # ---------------------------------------------------------------------------
 # helpers

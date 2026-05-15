@@ -5,7 +5,7 @@ Supports both standalone usage and compatibility with external argparse scripts
 via ``parse_known_args()``.
 
 Usage:
-    from queryctx_module.config import queryctx_args
+    from queryctx_module.config.data_config import queryctx_args
     args = queryctx_args()           # standalone parse
     args, _ = queryctx_args()        # same (returns args only)
 """

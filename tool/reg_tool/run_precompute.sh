@@ -3,10 +3,10 @@
 # run_precompute.sh — 控制 precompute_anchor_patch_v2.py
 #
 # 用法:
-#   bash reg_tool/run_precompute.sh              # 默认参数全量跑
-#   bash reg_tool/run_precompute.sh --skip-train # 仅推理
-#   bash reg_tool/run_precompute.sh --skip-infer # 仅训练
-#   bash reg_tool/run_precompute.sh --num-anchors 512 --k-patch 128 --seed 42
+#   bash tool/reg_tool/run_precompute.sh              # 默认参数全量跑
+#   bash tool/reg_tool/run_precompute.sh --skip-train # 仅推理
+#   bash tool/reg_tool/run_precompute.sh --skip-infer # 仅训练
+#   bash tool/reg_tool/run_precompute.sh --num-anchors 512 --k-patch 128 --seed 42
 
 set -euo pipefail
 
@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY_SCRIPT="${SCRIPT_DIR}/precompute_anchor_patch_v2.py"
 
 # ── 路径默认值 ────────────────────────────────────────────────
-BASE_DIR="${BASE_DIR:-${SCRIPT_DIR}/../dongfang_field1031}"
+BASE_DIR="${BASE_DIR:-/home/chengzhitong/5d_regular/seis_flow_data12V2/h5/dongfang}"
 RAW_H5="${RAW_H5:-${BASE_DIR}/raw5d_data1104.h5}"
 REGULAR_H5="${REGULAR_H5:-${BASE_DIR}/reg5dbin_label1031.h5}"
 GROUP_KEY="${GROUP_KEY:-1551}"

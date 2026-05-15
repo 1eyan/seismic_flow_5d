@@ -38,8 +38,8 @@ from tqdm import tqdm
 
 # -- internal (self-contained) --
 from .dataset import DatasetH5_all_queryctx
-from .config import get_parser
-from .coord_utils import build_coord_config
+from .config.data_config import get_parser
+from .utils import build_coord_config
 from .model import SeisDiTRopeV2
 from .fpm import FlowMatchingModel
 

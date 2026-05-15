@@ -15,47 +15,15 @@ from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 try:
     from .patch_sampler import (
         normalize_coords,
-        farthest_point_sampling,
-        top_l_neighbors,
-        diverse_topk,
-        build_train_patch,
-        make_grid_blocks,
-        make_grid_blocks_from_shape,
-        make_grid_blocks_from_shape_4d,
-        make_grid_blocks_from_index_map_4d,
-        ravel_grid_index_4d,
-        build_infer_patch,
-        accumulate_block_predictions,
-        finalize_predictions,
-        find_uncovered_points,
-        fallback_infer_for_uncovered,
         precompute_train_patches_2d,
-        precompute_infer_patches_2d,
         precompute_infer_patches_4d,
-        precompute_infer_patches_4d_block_center,
     )
 except ImportError:
     # Allow direct script usage from reg_tool directory.
     from patch_sampler import (
         normalize_coords,
-        farthest_point_sampling,
-        top_l_neighbors,
-        diverse_topk,
-        build_train_patch,
-        make_grid_blocks,
-        make_grid_blocks_from_shape,
-        make_grid_blocks_from_shape_4d,
-        make_grid_blocks_from_index_map_4d,
-        ravel_grid_index_4d,
-        build_infer_patch,
-        accumulate_block_predictions,
-        finalize_predictions,
-        find_uncovered_points,
-        fallback_infer_for_uncovered,
         precompute_train_patches_2d,
-        precompute_infer_patches_2d,
         precompute_infer_patches_4d,
-        precompute_infer_patches_4d_block_center,
     )
 
 
@@ -444,11 +412,24 @@ def read_trace_data(group: Any) -> np.ndarray:
     return data.astype(np.float32, copy=False)
 
 
-def read_regular_mask(group: Any, mask_key: str, n_grid: int) -> np.ndarray:
-    """Read and validate a regular-grid boolean mask."""
-    if mask_key not in group:
+def read_regular_mask(group: Any, mask_key: str, n_grid: int,
+                      target_h5: str = None, group_key: str = None) -> np.ndarray:
+    """Read and validate a regular-grid boolean mask.
+
+    If *mask_key* is not present in *group*, falls back to computing the mask
+    from *target_h5* data: traces that are all-near-zero → ``False``, otherwise
+    ``True``.
+    """
+    if mask_key in group:
+        mask = np.asarray(group[mask_key][:]).reshape(-1).astype(bool)
+    elif target_h5 and group_key:
+        print(f"regular H5 has no mask key {mask_key!r}, computing from target_h5 data")
+        with File(target_h5, "r") as f_target:
+            data = f_target[group_key]["data"][:]
+        mask = ~np.all(np.abs(data) < 1e-10, axis=1)
+        print(f"target_h5 mask: true={int(mask.sum())} false={int((~mask).sum())}")
+    else:
         raise KeyError(f"regular H5 group has no mask dataset {mask_key!r}")
-    mask = np.asarray(group[mask_key][:]).reshape(-1).astype(bool)
     if mask.size != n_grid:
         raise ValueError(
             f"regular mask length {mask.size} does not match regular trace count {n_grid}"
@@ -661,34 +642,74 @@ if __name__ == "__main__":
         "mode",
         nargs="?",
         default="anchor_patch",
-        choices=["anchor_patch", "binning", "kdtree", "csg", "crg"],
-        help="run mode",
+        choices=["anchor_patch", "binning", "binning+csg", "binning+crg", "kdtree", "csg", "crg"],
+        help="run mode (use binning+csg or binning+crg to chain binning then gather)",
     )
+    # ---- Paths ----
     parser.add_argument("--base_dir", type=str, default="/NAS/czt/mount/seis_flow_data12V2/h5/dongfang/")
     parser.add_argument("--raw_h5", type=str, default=None)
     parser.add_argument("--regular_h5", type=str, default=None)
     parser.add_argument("--target_h5", type=str, default=None)
     parser.add_argument("--group_key", type=str, default="1551")
-    parser.add_argument("--trusted_mask_key", type=str, default=None)
-    parser.add_argument("--num_anchors", type=int, default=2048)
-    parser.add_argument("--k_patch", type=int, default=64)
-    parser.add_argument("--top_l", type=int, default=128)
+    parser.add_argument("--patch-dir", type=str, default=None, help="override patch output dir")
+    parser.add_argument("--regular-mask-key", type=str, default="mask", help="key for regular mask in H5")
+
+    # ---- Train hyperparams (defaults aligned with run_precompute.sh) ----
+    parser.add_argument("--num_anchors", type=int, default=None,
+                        help="auto as N_obs // anchor_stride if None")
+    parser.add_argument("--anchor-stride", type=int, default=128)
+    parser.add_argument("--k_patch", type=int, default=256)
+    parser.add_argument("--top_l", type=int, default=None, help="auto as k_patch + 128 if None")
     parser.add_argument("--num_query", type=int, default=8)
+    parser.add_argument("--pool-size", type=int, default=None)
     parser.add_argument("--beta", type=float, default=0.3)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument(
-        "--facility-nearest-l",
-        type=int,
-        default=None,
-        help="facility_location 锚点：增益仅在距候选点最近的 L 个观测上累计；默认 None 表示对全体 N 点累计",
-    )
-    parser.add_argument("--grid_nx", type=int, default=0)
-    parser.add_argument("--grid_ny", type=int, default=0)
-    parser.add_argument("--block_bx", type=int, default=16)
-    parser.add_argument("--block_by", type=int, default=16)
-    parser.add_argument("--stride_sx", type=int, default=8)
-    parser.add_argument("--stride_sy", type=int, default=8)
     parser.add_argument("--metric_weights", type=str, default="1,1,0.5,0.5")
+
+    # ---- Anchor selector ----
+    parser.add_argument(
+        "--train-anchor-selector",
+        choices=["farthest_point_sampling", "facility_location_anchor_sampling", "value_based_anchor_sampling"],
+        default="value_based_anchor_sampling",
+    )
+    parser.add_argument("--train-trusted-source", choices=["all", "regular_mask"], default="all")
+    parser.add_argument("--trusted_mask_key", type=str, default=None,
+                        help="raw H5 mask key for trusted obs (overrides trust derived from regular_mask)")
+
+    # ---- Value-based anchor sampling params ----
+    parser.add_argument("--value-local-top-l", type=int, default=None, help="auto as top_l if None")
+    parser.add_argument("--value-suppression", choices=["subtractive", "multiplicative"], default="subtractive")
+    parser.add_argument("--value-suppression-lambda", type=float, default=1.0)
+    parser.add_argument("--value-score-tol", type=float, default=0.0)
+    parser.add_argument("--value-knn-gpu-batch-rows", type=int, default=512)
+    parser.add_argument("--value-knn-gpu-device", type=str, default="cuda:0")
+    parser.add_argument("--value-knn-full-matrix-max-n", type=int, default=4096)
+    parser.add_argument("--train-knn-use-gpu", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--train-suppression-use-gpu", action=argparse.BooleanOptionalAction, default=True)
+
+    # ---- Inference (4D block) ----
+    parser.add_argument("--block-size", type=int, nargs=4, default=None)
+    parser.add_argument("--stride", type=int, nargs=4, default=None)
+    parser.add_argument("--block-divisors", type=int, nargs=4, default=(6, 21, 7, 5))
+    parser.add_argument("--stride-divisors", type=int, nargs=4, default=(6, 21, 7, 5))
+    parser.add_argument("--on-grid-collision", choices=["raise", "last"], default="raise")
+    parser.add_argument("--query-mask-mode", choices=["regular_true", "regular_false", "all", "none"],
+                        default="regular_true")
+    parser.add_argument("--infer-obs-valid-source", choices=["none", "regular_mask"], default="none")
+    parser.add_argument("--infer-top-l", type=int, default=None, help="auto as k_patch * 2 if None")
+    parser.add_argument("--max-query-per-patch", type=int, default=128)
+    parser.add_argument("--gpu-query-chunk-size", type=int, default=128)
+    parser.add_argument("--infer-gpu-device", type=str, default="cuda:0")
+    parser.add_argument("--infer-use-gpu", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--require-full-query-coverage", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--greedy-fill-uncovered", action=argparse.BooleanOptionalAction, default=True)
+
+    # ---- Misc ----
+    parser.add_argument("--skip-train", action="store_true")
+    parser.add_argument("--skip-infer", action="store_true")
+    parser.add_argument("--save-legacy-anchor-files", action="store_true")
+    parser.add_argument("--save-grid-index-map", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--summary-json", type=str, default=None)
     parser.add_argument(
         "--raw_key_aggregate",
         type=str,
@@ -697,23 +718,26 @@ if __name__ == "__main__":
         help="anchor_patch模式下是否先按键聚合raw观测道",
     )
     parser.add_argument(
-        "--infer_query_from_missing_only",
+        "--enable-auto-params",
         action="store_true",
-        help="推理query仅使用regular中缺失道(mask==0)",
+        help="根据观测系统自动计算num_anchors/k_patch/top_l/block_divisors等超参数",
     )
-    parser.add_argument(
-        "--require_full_missing_coverage",
-        action="store_true",
-        help="当启用缺失query时，强制检查是否覆盖全部缺失道",
-    )
+    parser.add_argument("--auto-params-anchor-stride", type=int, default=128)
+
     args = parser.parse_args()
 
+    resolved_modes = [m.strip() for m in args.mode.split("+")]
+
     base_dir = args.base_dir
-    patch_dir = os.path.join(base_dir, "patch")
-    os.makedirs(patch_dir, exist_ok=True)
     info_h5_raw = args.raw_h5 or os.path.join(base_dir, "raw5d_data1104.h5")
     info_h5_regular = args.regular_h5 or os.path.join(base_dir, "reg5dbin_label1031.h5")
-    info_h5_target = args.target_h5 or os.path.join(base_dir, "reg5dbin_label1031_binning.h5")
+
+    # patch dir and target_h5 at the same level as input H5 files
+    h5_dirs = set(os.path.dirname(os.path.abspath(p)) for p in (info_h5_raw, info_h5_regular))
+    h5_root = sorted(h5_dirs)[0]
+    info_h5_target = args.target_h5 or os.path.join(h5_root, "targeth5_binning.h5")
+    patch_dir = args.patch_dir if args.patch_dir else os.path.join(h5_root, "patch")
+    os.makedirs(patch_dir, exist_ok=True)
 
     metric_weights = [float(v) for v in args.metric_weights.split(",")]
     if len(metric_weights) != 4:
@@ -722,13 +746,115 @@ if __name__ == "__main__":
     def cover_dict2npy(gather_dict):
         return np.concatenate([np.array(gather_dict[key]) for key in gather_dict.keys()]), np.array(list(gather_dict.keys()))
 
-    with File(info_h5_raw, "r") as f_raw, File(info_h5_regular, "r+") as f_reg:
-        info_f_raw = f_raw[args.group_key]
-        info_f_regular = f_reg[args.group_key]
-        print("raw keys:", list(info_f_raw.keys()))
-        print("regular keys:", list(info_f_regular.keys()))
+    def _auto_compute_params(raw_group, reg_group):
+        """Auto-compute anchor params from observation system."""
+        sx_r = raw_group["sx"][:].astype(np.float32)
+        sy_r = raw_group["sy"][:].astype(np.float32)
+        rx_r = raw_group["rx"][:].astype(np.float32)
+        ry_r = raw_group["ry"][:].astype(np.float32)
+        sx_g = reg_group["sx"][:].astype(np.float32)
+        sy_g = reg_group["sy"][:].astype(np.float32)
+        rx_g = reg_group["rx"][:].astype(np.float32)
+        ry_g = reg_group["ry"][:].astype(np.float32)
 
-        if args.mode == "anchor_patch":
+        n_obs = sx_r.shape[0]
+        n_grid = sx_g.shape[0]
+
+        num_anchors = max(1, n_obs // args.auto_params_anchor_stride)
+
+        def _grid_step(arr):
+            u = np.sort(np.unique(arr))
+            if u.size < 2:
+                return None, u
+            d = np.diff(u)
+            d = d[d > 1e-9]
+            return float(np.median(d)) if d.size > 0 else None, u
+
+        _, sx_u = _grid_step(sx_g)
+        _, sy_u = _grid_step(sy_g)
+        _, rx_u = _grid_step(rx_g)
+        _, ry_u = _grid_step(ry_g)
+        nsx, nsy, nrx, nry = len(sx_u), len(sy_u), len(rx_u), len(ry_u)
+        dims_4d = (nsx, nsy, nrx, nry)
+
+        avg_density = n_grid / max(1, nsx * nsy * nrx * nry)
+        coverage = n_obs / n_grid if n_grid > 0 else 1.0
+
+        k_patch = int(np.clip(32 + 192 * coverage, 32, 512))
+        top_l = 2 * k_patch
+        num_query = max(1, min(k_patch // 4, 32))
+
+        target_cells = max(256, int(400 / max(avg_density, 0.01)))
+        vol_per_dim = target_cells ** (1.0 / 4.0)
+        block_divs = tuple(max(1, int(round(d / max(1.0, vol_per_dim)))) for d in dims_4d)
+        stride_divs = block_divs  # 50% overlap
+        block_sz = tuple(max(1, d // b) for d, b in zip(dims_4d, block_divs))
+
+        # metric_weights from coordinate ranges
+        r_sx = max(sx_u.max() - sx_u.min(), 1e-6)
+        r_sy = max(sy_u.max() - sy_u.min(), 1e-6)
+        r_rx = max(rx_u.max() - rx_u.min(), 1e-6)
+        r_ry = max(ry_u.max() - ry_u.min(), 1e-6)
+        w = [1.0, r_sx / r_sy, r_sx / r_rx * 0.5, r_sx / r_ry * 0.5]
+        w_sum = sum(w)
+        metric_w = tuple(round(v * 4.0 / w_sum, 3) for v in w)
+
+        print("[auto_params] computed from observation system:")
+        print(f"  grid dims: {nsx}x{nsy}x{nrx}x{nry}  N_obs={n_obs}  N_grid={n_grid}")
+        print(f"  num_anchors={num_anchors} (anchor_stride={args.auto_params_anchor_stride})")
+        print(f"  k_patch={k_patch}  top_l={top_l}  num_query={num_query}")
+        print(f"  block_divisors={list(block_divs)}  block_size={list(block_sz)}")
+        print(f"  stride_divisors={list(stride_divs)}")
+        print(f"  metric_weights={metric_w}")
+
+        return {
+            "num_anchors": num_anchors,
+            "k_patch": k_patch,
+            "top_l": top_l,
+            "num_query": num_query,
+            "metric_weights": list(metric_w),
+            "block_divisors": list(block_divs),
+            "stride_divisors": list(stride_divs),
+        }
+
+    # ── Run binning if needed (always first in chain) ──
+    ran_binning = False
+    if "binning" in resolved_modes:
+        with File(info_h5_raw, "r") as f_raw, File(info_h5_regular, "r+") as f_reg:
+            info_f_raw = f_raw[args.group_key]
+            info_f_regular = f_reg[args.group_key]
+            print("raw keys:", list(info_f_raw.keys()))
+            print("regular keys:", list(info_f_regular.keys()))
+            target, mask, report = binning(info_f_raw, info_f_regular)
+            info_f_regular["mask"] = mask
+            print("缺失率：", (1 - mask.sum() / len(mask)))
+            print("分箱报告:", report)
+            saveh5(target, info_f_regular, info_h5_target, args.group_key)
+            with File(info_h5_target, "r") as f_target:
+                print("target keys:", list(f_target[args.group_key].keys()))
+        ran_binning = True
+        resolved_modes = [m for m in resolved_modes if m != "binning"]
+
+    # ── Execute remaining mode(s) ──
+    if not resolved_modes:
+        sys.exit(0)
+
+    actual_mode = resolved_modes[0]
+    if actual_mode not in ("anchor_patch", "kdtree", "csg", "crg"):
+        raise ValueError(f"unknown post-binning mode: {actual_mode}")
+
+    if ran_binning and actual_mode in ("csg", "crg"):
+        _use_regular = info_h5_target
+    else:
+        _use_regular = info_h5_regular
+
+    if actual_mode == "anchor_patch":
+        with File(info_h5_raw, "r") as f_raw, File(_use_regular, "r+") as f_reg:
+            info_f_raw = f_raw[args.group_key]
+            info_f_regular = f_reg[args.group_key]
+            print("raw keys:", list(info_f_raw.keys()))
+            print("regular keys:", list(info_f_regular.keys()))
+
             trace_obs_raw = _read_array(info_f_raw, "data").astype(np.float32)
             coord_obs_raw = np.column_stack(
                 (
@@ -738,10 +864,11 @@ if __name__ == "__main__":
                     _read_array(info_f_raw, "ry"),
                 )
             ).astype(np.float32)
-            raw_keys = generate_binning_keys(info_f_raw)
+            raw_keys = generate_binning_keys(info_f_raw).astype(np.int64)
             if trace_obs_raw.shape[0] != coord_obs_raw.shape[0] or trace_obs_raw.shape[0] != raw_keys.shape[0]:
                 raise ValueError("raw data/coord/keys length mismatch")
 
+            # ── optional key-mean aggregation ──
             if args.raw_key_aggregate == "mean":
                 trace_obs, coord_obs, obs_keys, key_counts = _aggregate_raw_by_keys_mean(
                     trace_obs=trace_obs_raw,
@@ -766,140 +893,316 @@ if __name__ == "__main__":
                     _read_array(info_f_regular, "ry"),
                 )
             ).astype(np.float32)
-            reg_keys = generate_binning_keys(info_f_regular)
+            reg_keys = generate_binning_keys(info_f_regular).astype(np.int64)
 
+            if reg_keys.shape[0] != coord_grid.shape[0]:
+                raise ValueError("regular coordinates and regular binning keys must have the same length")
+
+            # ── regular mask ──
+            regular_mask = read_regular_mask(
+                info_f_regular, args.regular_mask_key, coord_grid.shape[0],
+                target_h5=info_h5_target, group_key=args.group_key,
+            )
+            print("regular mask true count:", int(regular_mask.sum()))
+
+            # ── raw_obs_valid from regular mask ──
+            raw_obs_valid = raw_obs_valid_mask_from_regular_trusted_mask(
+                raw_binning_keys=obs_keys,
+                reg_binning_keys=reg_keys,
+                regular_trusted_mask=regular_mask,
+            )
+            trusted_from_mask = np.flatnonzero(raw_obs_valid).astype(np.int64)
+            np.save(os.path.join(patch_dir, "raw_obs_valid_mask.npy"), raw_obs_valid)
+            
+            # ── coordinate normalization ──
+            coord_obs_norm, coord_grid_norm, norm_stats = normalize_coords(coord_obs, coord_grid)
+            save_norm_stats(Path(patch_dir) / "coord_norm_stats.npz", norm_stats)
+            np.save(os.path.join(patch_dir, "coord_obs_norm.npy"), coord_obs_norm)
+            np.save(os.path.join(patch_dir, "coord_grid_norm.npy"), coord_grid_norm)
+            print("coord_obs_norm range:", float(coord_obs_norm.min()), float(coord_obs_norm.max()))
+            print("coord_grid_norm range:", float(coord_grid_norm.min()), float(coord_grid_norm.max()))
+
+            # ── 4D grid index map ──
+            grid_index_map_4d, grid_info = build_grid_index_map_4d_from_coord_grid(
+                coord_grid_norm,
+                on_collision=args.on_grid_collision,
+            )
+            dims_4d = (grid_info["nsx"], grid_info["nsy"], grid_info["nrx"], grid_info["nry"])
+            valid_grid_cells = int(np.count_nonzero(grid_index_map_4d >= 0))
+            if valid_grid_cells != coord_grid.shape[0] and args.on_grid_collision == "raise":
+                raise ValueError("grid index map valid cell count does not match coord_grid rows")
+            if args.save_grid_index_map:
+                np.save(os.path.join(patch_dir, "grid_index_map_4d.npy"), grid_index_map_4d)
+                np.savez(
+                    os.path.join(patch_dir, "grid_index_map_4d_levels.npz"),
+                    sx_levels=grid_info["sx_levels"],
+                    sy_levels=grid_info["sy_levels"],
+                    rx_levels=grid_info["rx_levels"],
+                    ry_levels=grid_info["ry_levels"],
+                )
+            print("grid_index_map_4d shape:", grid_index_map_4d.shape)
+            print("grid_index_map_4d valid cells:", valid_grid_cells)
+
+            # ── resolve hyperparameters ──
+            mw = metric_weights
+            k_patch = int(args.k_patch)
+            top_l = int(args.top_l) if args.top_l is not None else k_patch + 128
+            infer_top_l = int(args.infer_top_l) if args.infer_top_l is not None else k_patch * 2
+            num_anchors = (
+                int(args.num_anchors)
+                if args.num_anchors is not None
+                else max(1, int(trace_obs.shape[0]) // int(args.anchor_stride))
+            )
+            num_query = args.num_query
+            value_local_top_l = args.value_local_top_l
+            if value_local_top_l is None:
+                value_local_top_l = top_l
+
+            if args.enable_auto_params:
+                ap = _auto_compute_params(info_f_raw, info_f_regular)
+                num_anchors = ap["num_anchors"]
+                k_patch = ap["k_patch"]
+                top_l = ap["top_l"]
+                num_query = ap["num_query"]
+                mw = ap["metric_weights"]
+                infer_top_l = k_patch * 2
+                value_local_top_l = top_l
+                args.block_divisors = tuple(ap["block_divisors"])
+                args.stride_divisors = tuple(ap["stride_divisors"])
+
+            # ── summary dict ──
+            summary: Dict[str, Any] = {
+                "base_dir": str(base_dir),
+                "raw_h5": str(info_h5_raw),
+                "regular_h5": str(info_h5_regular),
+                "patch_dir": str(patch_dir),
+                "group_key": args.group_key,
+                "n_obs": int(coord_obs.shape[0]),
+                "n_grid": int(coord_grid.shape[0]),
+                "grid_shape_4d": [int(x) for x in dims_4d],
+                "k_patch": k_patch,
+                "top_l": top_l,
+                "infer_top_l": infer_top_l,
+                "num_anchors": num_anchors,
+                "metric_weights": mw,
+            }
+
+        # ── Training ──
+        if not args.skip_train:
             if args.trusted_mask_key is not None and args.trusted_mask_key in info_f_raw:
-                trusted_mask = _read_array(info_f_raw, args.trusted_mask_key).astype(bool)
-                trusted_idx = np.flatnonzero(trusted_mask).astype(np.int64)
+                trusted_mask_arr = _read_array(info_f_raw, args.trusted_mask_key).astype(bool)
+                trusted_idx = np.flatnonzero(trusted_mask_arr).astype(np.int64)
                 print(
                     f"trusted_idx from raw mask key={args.trusted_mask_key}, "
                     f"count={trusted_idx.size}"
                 )
-            elif "mask" in info_f_regular:
-                # Preferred mapping: regular mask -> trusted regular keys -> observed keys.
-                reg_mask = _read_array(info_f_regular, "mask").astype(bool).reshape(-1)
-                if reg_mask.shape[0] != reg_keys.shape[0]:
-                    raise ValueError("regular mask length mismatch with regular keys")
-                trusted_reg_keys = reg_keys[reg_mask]
-                trusted_idx = np.flatnonzero(
-                    np.isin(_rows_as_struct(obs_keys), _rows_as_struct(trusted_reg_keys))
-                ).astype(np.int64)
-                print(
-                    "trusted_idx from regular mask-key mapping, "
-                    f"regular_mask_sum={int(reg_mask.sum())}, trusted_idx_count={trusted_idx.size}"
-                )
-            else:
+            elif args.train_trusted_source == "all":
                 trusted_idx = np.arange(coord_obs.shape[0], dtype=np.int64)
-                print(f"trusted_idx use all observed traces, count={trusted_idx.size}")
+                print(f"train trusted_source=all, count={trusted_idx.size}")
+            else:
+                pass
+            if trusted_idx.size == 0:
+                raise ValueError("no trusted training observations are available")
 
-            coord_obs_norm, coord_grid_norm, norm_stats = normalize_coords(coord_obs, coord_grid)
-            norm_stats_flat = {
-                "obs_min": norm_stats["obs"]["min"],
-                "obs_max": norm_stats["obs"]["max"],
-                "obs_mean": norm_stats["obs"]["mean"],
-                "obs_std": norm_stats["obs"]["std"],
-                "grid_min": norm_stats["grid"]["min"],
-                "grid_max": norm_stats["grid"]["max"],
-                "grid_mean": norm_stats["grid"]["mean"],
-                "grid_std": norm_stats["grid"]["std"],
-            }
-            np.savez(os.path.join(patch_dir, "coord_norm_stats.npz"), **norm_stats_flat)
-
+            print("building train patches")
+            print("train anchor selector:", args.train_anchor_selector)
+            print("train num_anchors:", num_anchors, "k_patch:", k_patch, "top_l:", top_l)
             train_pack = precompute_train_patches_2d(
                 coord_obs_norm=coord_obs_norm,
                 trace_obs=trace_obs,
                 trusted_idx=trusted_idx,
-                num_anchors=args.num_anchors,
-                k_patch=args.k_patch,
-                top_l=args.top_l,
-                metric_weights=metric_weights,
+                num_anchors=num_anchors,
+                k_patch=k_patch,
+                top_l=top_l,
+                metric_weights=mw,
                 beta=args.beta,
-                facility_nearest_l=args.facility_nearest_l,
+                anchor_selector=args.train_anchor_selector,
+                facility_nearest_l=top_l,
+                value_local_top_l=value_local_top_l,
+                value_suppression=args.value_suppression,
+                value_suppression_lambda=args.value_suppression_lambda,
+                value_score_tol=args.value_score_tol,
+                value_knn_use_gpu=args.train_knn_use_gpu,
+                value_knn_gpu_batch_rows=args.value_knn_gpu_batch_rows,
+                value_knn_gpu_device=args.value_knn_gpu_device,
+                value_knn_full_matrix_max_n=args.value_knn_full_matrix_max_n,
+                value_suppression_use_gpu=args.train_suppression_use_gpu,
+                num_query=num_query,
+                seed=args.seed,
+                pool_size=args.pool_size,
             )
-            # Saved as 2D arrays (pad=-1), compatible with np.load(... )['0'] style.
-            np.savez(os.path.join(patch_dir, "anchor_train_patch_idx_2d.npz"), **{"0": train_pack["patch_idx_2d"]})
-            np.savez(os.path.join(patch_dir, "anchor_train_context_idx_2d.npz"), **{"0": train_pack["context_idx_2d"]})
-            np.savez(os.path.join(patch_dir, "anchor_train_query_idx_2d.npz"), **{"0": train_pack["query_idx_2d"]})
-            np.save(os.path.join(patch_dir, "anchor_train_anchor_idx.npy"), train_pack["anchor_idx"])
-            np.save(os.path.join(patch_dir, "anchor_train_anchor_coord.npy"), train_pack["anchor_coord"])
+            np.savez(
+                os.path.join(patch_dir, "train_pool_idx_2d.npz"),
+                pool_idx_2d=train_pack["patch_idx_2d"],
+                anchor_idx=train_pack["anchor_idx"],
+            )
+            if args.save_legacy_anchor_files:
+                np.savez(os.path.join(patch_dir, "anchor_train_patch_idx_2d.npz"), **{"0": train_pack["patch_idx_2d"]})
+                np.savez(os.path.join(patch_dir, "anchor_train_context_idx_2d.npz"), **{"0": train_pack["context_idx_2d"]})
+                np.savez(os.path.join(patch_dir, "anchor_train_query_idx_2d.npz"), **{"0": train_pack["query_idx_2d"]})
+                np.save(os.path.join(patch_dir, "anchor_train_anchor_idx.npy"), train_pack["anchor_idx"])
+                np.save(os.path.join(patch_dir, "anchor_train_anchor_coord.npy"), train_pack["anchor_coord"])
+            print("train_pool_idx_2d:", train_pack["patch_idx_2d"].shape)
+            summary["train_pool_shape"] = [int(x) for x in train_pack["patch_idx_2d"].shape]
 
-            if args.grid_nx > 0 and args.grid_ny > 0:
-                grid_shape_or_indices = (args.grid_nx, args.grid_ny)
-            else:
-                # Fallback: treat flattened grid as one-row 2D index map.
-                grid_shape_or_indices = np.arange(coord_grid_norm.shape[0], dtype=np.int64).reshape(1, -1)
-                print("warning: grid_nx/grid_ny not set, fallback to shape [1, N_grid].")
+        # ── Inference ──
+        if not args.skip_infer:
+            block_size = resolve_block_tuple(args.block_size, args.block_divisors, dims_4d, "block_size")
+            stride = resolve_block_tuple(args.stride, args.stride_divisors, dims_4d, "stride")
+            query_mask = make_query_mask(
+                mode=args.query_mask_mode,
+                regular_mask=regular_mask,
+                n_grid=coord_grid.shape[0],
+            )
+            obs_valid_mask = None
+            if args.infer_obs_valid_source == "regular_mask":
+                obs_valid_mask = raw_obs_valid
 
-            infer_pack = precompute_infer_patches_2d(
+            print("building infer patches (4D)")
+            print("block_size:", block_size, "stride:", stride)
+            print("query_mask_mode:", args.query_mask_mode)
+            if query_mask is not None:
+                print("query targets:", int(query_mask.sum()))
+            print("infer k_patch:", k_patch, "infer_top_l:", infer_top_l)
+            infer_pack = precompute_infer_patches_4d(
                 coord_obs_norm=coord_obs_norm,
                 coord_grid_norm=coord_grid_norm,
-                grid_shape_or_indices=grid_shape_or_indices,
-                block_size=(args.block_bx, args.block_by),
-                stride=(args.stride_sx, args.stride_sy),
-                k_patch=args.k_patch,
-                top_l=args.top_l,
-                metric_weights=metric_weights,
+                grid_shape_4d=None,
+                block_size=block_size,
+                stride=stride,
+                k_patch=k_patch,
+                top_l=infer_top_l,
+                metric_weights=mw,
                 beta=args.beta,
-                grid_query_mask=(
-                    (_read_array(info_f_regular, "mask").reshape(-1) == 0)
-                    if (args.infer_query_from_missing_only and "mask" in info_f_regular)
-                    else None
-                ),
-                require_full_query_coverage=args.require_full_missing_coverage,
+                grid_query_mask=query_mask,
+                require_full_query_coverage=args.require_full_query_coverage,
+                grid_index_map_4d=grid_index_map_4d,
+                max_query_per_patch=args.max_query_per_patch,
+                greedy_fill_uncovered=args.greedy_fill_uncovered,
+                obs_valid_mask=obs_valid_mask,
+                use_gpu=args.infer_use_gpu,
+                gpu_device=args.infer_gpu_device,
+                gpu_query_chunk_size=args.gpu_query_chunk_size,
             )
-            np.savez(os.path.join(patch_dir, "infer_patch_idx_2d.npz"), **{"0": infer_pack["patch_idx_2d"]})
-            np.savez(os.path.join(patch_dir, "infer_patch_mask_2d.npz"), **{"0": infer_pack["patch_mask_2d"]})
-            np.save(os.path.join(patch_dir, "infer_block_id.npy"), infer_pack["block_id"])
-            np.save(os.path.join(patch_dir, "infer_block_center_grid_idx.npy"), infer_pack["block_center_grid_idx"])
+            query_list = infer_pack["grid_query_idx_list"]
+            context_list = infer_pack["patch_idx_list"]
+            input_missing_ratio = summarize_query_context(query_list, context_list)
+            np.savez(
+                os.path.join(patch_dir, "infer_query_context.npz"),
+                grid_query_idx_list=object_array(query_list),
+                context_idx_list=object_array(context_list),
+                block_id=infer_pack["block_id"],
+                block_center_grid_idx=infer_pack["block_center_grid_idx"],
+                anchor_grid_idx_list=object_array(infer_pack["anchor_grid_idx_list"]),
+            )
+            np.savez(
+                os.path.join(patch_dir, "infer_query_context_stats.npz"),
+                patch_query_count=infer_pack["patch_query_count"],
+                patch_context_count=infer_pack["patch_context_count"],
+                patch_input_count=infer_pack["patch_input_count"],
+                patch_query_ratio=infer_pack["patch_query_ratio"],
+                input_missing_ratio=input_missing_ratio,
+            )
+            print("infer_query_context samples:", len(query_list))
+            if len(query_list):
+                print(
+                    "query count min/max/mean:",
+                    int(infer_pack["patch_query_count"].min()),
+                    int(infer_pack["patch_query_count"].max()),
+                    float(infer_pack["patch_query_count"].mean()),
+                )
+                print(
+                    "input missing ratio min/max/mean:",
+                    float(input_missing_ratio.min()),
+                    float(input_missing_ratio.max()),
+                    float(input_missing_ratio.mean()),
+                )
+            summary["infer_samples"] = int(len(query_list))
+            summary["block_size"] = [int(x) for x in block_size]
+            summary["stride"] = [int(x) for x in stride]
+            summary["query_mask_mode"] = args.query_mask_mode
 
-            print("saved train/infer index arrays to:", patch_dir)
-            print("train patch 2d:", train_pack["patch_idx_2d"].shape)
-            print("train context 2d:", train_pack["context_idx_2d"].shape)
-            print("train query 2d:", train_pack["query_idx_2d"].shape)
-            print("infer patch 2d:", infer_pack["patch_idx_2d"].shape)
-            print("infer patch mask 2d:", infer_pack["patch_mask_2d"].shape)
+        # ── validation + summary ──
+        validation = validate_outputs(
+            patch_dir=Path(patch_dir),
+            n_obs=coord_obs.shape[0],
+            n_grid=coord_grid.shape[0],
+            check_train=not args.skip_train,
+            check_infer=not args.skip_infer,
+        )
+        summary["validation"] = validation
+        print("validation:", validation)
 
-        elif args.mode == "binning":
-            target, mask, report = binning(info_f_raw, info_f_regular)
-            info_f_regular["mask"] = mask
-            print("缺失率：", (1 - mask.sum() / len(mask)))
-            print("分箱报告:", report)
-            saveh5(target, info_f_regular, info_h5_target, args.group_key)
+        summary_path = (
+            Path(args.summary_json).expanduser().resolve()
+            if args.summary_json
+            else Path(patch_dir) / "precompute_anchor_patch_v2_summary.json"
+        )
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        print("summary_json:", summary_path)
+        print("All checks passed.")
 
-            with File(info_h5_target, "r") as f_target:
-                print("target keys:", list(f_target[args.group_key].keys()))
-        else:
-            with File(info_h5_target, "r") as f_target:
-                info_f_target = f_target[args.group_key]
-                print("target keys:", list(info_f_target.keys()))
-                if args.mode == "kdtree":
-                    train_neighbors, test_neighbors, val_idx = kdtree(info_f_regular)
-                    print("kdtree train/test/val:", train_neighbors.shape, test_neighbors.shape, val_idx.shape)
-                elif args.mode == "csg":
-                    csg_reg = gather(info_f_regular, "csg")
-                    csg_raw = gather(info_f_raw, "csg")
-                    csg_tgt = gather(info_f_target, "csg")
-                    csg_np_reg, idx_2_key_reg = cover_dict2npy(csg_reg)
-                    csg_np_raw, idx_2_key_raw = cover_dict2npy(csg_raw)
-                    csg_np_tgt, idx_2_key_tgt = cover_dict2npy(csg_tgt)
-                    print("shot_num:", len(csg_reg.keys()))
-                    np.savez(os.path.join(patch_dir, "csg_np_reg.npz"), csg_np_reg)
-                    np.savez(os.path.join(patch_dir, "csg_np_raw.npz"), csg_np_raw)
-                    np.savez(os.path.join(patch_dir, "csg_np_tgt.npz"), csg_np_tgt)
-                    np.save(os.path.join(patch_dir, "csg_idx_2_key_reg.npy"), idx_2_key_reg)
-                    np.save(os.path.join(patch_dir, "csg_idx_2_key_raw.npy"), idx_2_key_raw)
-                    np.save(os.path.join(patch_dir, "csg_idx_2_key_tgt.npy"), idx_2_key_tgt)
-                elif args.mode == "crg":
-                    crg_reg = gather(info_f_regular, "crg")
-                    crg_raw = gather(info_f_raw, "crg")
-                    crg_tgt = gather(info_f_target, "crg")
-                    crg_np_reg, idx_2_key_reg = cover_dict2npy(crg_reg)
-                    crg_np_raw, idx_2_key_raw = cover_dict2npy(crg_raw)
-                    crg_np_tgt, idx_2_key_tgt = cover_dict2npy(crg_tgt)
-                    print("recv_num:", len(crg_reg.keys()))
-                    np.savez(os.path.join(patch_dir, "crg_np_reg.npz"), crg_np_reg)
-                    np.savez(os.path.join(patch_dir, "crg_np_raw.npz"), crg_np_raw)
-                    np.savez(os.path.join(patch_dir, "crg_np_tgt.npz"), crg_np_tgt)
-                    np.save(os.path.join(patch_dir, "crg_idx_2_key_reg.npy"), idx_2_key_reg)
-                    np.save(os.path.join(patch_dir, "crg_idx_2_key_raw.npy"), idx_2_key_raw)
-                    np.save(os.path.join(patch_dir, "crg_idx_2_key_tgt.npy"), idx_2_key_tgt)
+    elif actual_mode in ("kdtree", "csg", "crg"):
+        with File(info_h5_raw, "r") as f_raw, File(_use_regular, "r") as f_reg:
+            info_f_raw = f_raw[args.group_key]
+            info_f_regular = f_reg[args.group_key]
+            print("raw keys:", list(info_f_raw.keys()))
+            print("regular keys:", list(info_f_regular.keys()))
+
+            if actual_mode == "kdtree":
+                train_neighbors, test_neighbors, val_idx = kdtree(info_f_regular)
+                print("kdtree train/test/val:", train_neighbors.shape, test_neighbors.shape, val_idx.shape)
+                np.savez(os.path.join(patch_dir, "train_pool_idx_2d.npz"),
+                         pool_idx_2d=train_neighbors)
+
+            elif actual_mode == "csg":
+                csg_reg = gather(info_f_regular, "csg")
+                csg_raw = gather(info_f_raw, "csg")
+                print("shot_num:", len(csg_reg.keys()))
+                # Save gathers as object arrays (one per gather)
+                reg_gathers = np.empty(len(csg_reg), dtype=object)
+                reg_keys = np.empty(len(csg_reg), dtype=object)
+                for i, (k, v) in enumerate(sorted(csg_reg.items())):
+                    reg_gathers[i] = np.asarray(v, dtype=np.int64)
+                    reg_keys[i] = np.asarray(k, dtype=np.int64)
+                np.savez(os.path.join(patch_dir, "csg_train_pool.npz"),
+                         pool_idx=reg_gathers, pool_key=reg_keys)
+                raw_gathers = np.empty(len(csg_raw), dtype=object)
+                for i, (k, v) in enumerate(sorted(csg_raw.items())):
+                    raw_gathers[i] = np.asarray(v, dtype=np.int64)
+                np.savez(os.path.join(patch_dir, "csg_raw_pool.npz"), pool_idx=raw_gathers)
+                print(f"saved csg_train_pool.npz: {len(csg_reg)} gathers")
+
+            elif actual_mode == "crg":
+                crg_reg = gather(info_f_regular, "crg")
+                crg_raw = gather(info_f_raw, "crg")
+                print("recv_num:", len(crg_reg.keys()))
+                reg_gathers = np.empty(len(crg_reg), dtype=object)
+                reg_keys = np.empty(len(crg_reg), dtype=object)
+                for i, (k, v) in enumerate(sorted(crg_reg.items())):
+                    reg_gathers[i] = np.asarray(v, dtype=np.int64)
+                    reg_keys[i] = np.asarray(k, dtype=np.int64)
+                np.savez(os.path.join(patch_dir, "crg_train_pool.npz"),
+                         pool_idx=reg_gathers, pool_key=reg_keys)
+                raw_gathers = np.empty(len(crg_raw), dtype=object)
+                for i, (k, v) in enumerate(sorted(crg_raw.items())):
+                    raw_gathers[i] = np.asarray(v, dtype=np.int64)
+                np.savez(os.path.join(patch_dir, "crg_raw_pool.npz"), pool_idx=raw_gathers)
+                print(f"saved crg_train_pool.npz: {len(crg_reg)} gathers")
+
+            # Build infer_query_context: query = missing, context = observed
+            mask_arr = _read_array(info_f_regular, "mask").astype(bool).reshape(-1) if "mask" in info_f_regular else None
+            if mask_arr is not None:
+                missing_idx = np.flatnonzero(~mask_arr).astype(np.int64)
+                obs_idx = np.flatnonzero(mask_arr).astype(np.int64)
+                print(f"missing: {missing_idx.size}  observed: {obs_idx.size}")
+                np.savez(
+                    os.path.join(patch_dir, "infer_query_context.npz"),
+                    grid_query_idx_list=np.asarray([missing_idx], dtype=object),
+                    context_idx_list=np.asarray([obs_idx], dtype=object),
+                    block_id=np.array([0], dtype=np.int64),
+                    block_center_grid_idx=np.array([-1], dtype=np.int64),
+                    anchor_grid_idx_list=np.asarray([missing_idx], dtype=object),
+                )
+                print("saved infer_query_context.npz")

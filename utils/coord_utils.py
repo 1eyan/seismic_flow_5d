@@ -8,7 +8,7 @@ Central module for:
 - Checking training/inference coordinate consistency
 
 Usage:
-    from queryctx_module.coord_utils import build_coord_config, save_coord_config, load_coord_config
+    from queryctx_module.utils.coord_utils import build_coord_config, save_coord_config, load_coord_config
 
     # After creating DatasetH5_all_queryctx (which has .coord_stats attribute):
     coord_config = build_coord_config(dataset)
