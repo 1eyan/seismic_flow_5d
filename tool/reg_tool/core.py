@@ -1133,15 +1133,6 @@ if __name__ == "__main__":
         summary["validation"] = validation
         print("validation:", validation)
 
-        summary_path = (
-            Path(args.summary_json).expanduser().resolve()
-            if args.summary_json
-            else Path(patch_dir) / "precompute_anchor_patch_v2_summary.json"
-        )
-        with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2, ensure_ascii=False)
-        print("summary_json:", summary_path)
-        print("All checks passed.")
 
     elif actual_mode in ("kdtree", "csg", "crg"):
         with File(info_h5_raw, "r") as f_raw, File(_use_regular, "r") as f_reg:
