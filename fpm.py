@@ -7,7 +7,7 @@ Adapted from FPM.py with internal import paths adjusted.
 import torch
 import torch.nn as nn
 
-from .transport import create_transport, Sampler
+from transport import create_transport, Sampler
 
 
 class FlowMatchingModel(nn.Module):

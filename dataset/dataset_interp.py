@@ -17,15 +17,8 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 from h5py import File
 
-try:
-    from ..utils.sampler_utils import diverse_topk
-except ImportError:
-    from queryctx_module.utils.sampler_utils import diverse_topk
-
-try:
-    from ..config.segy_config import COORD_COL as _COORD_COL, TRACE_SORT_KEYS
-except ImportError:
-    from config.segy_config import COORD_COL as _COORD_COL, TRACE_SORT_KEYS
+from utils.sampler_utils import diverse_topk
+from config.segy_config import COORD_COL as _COORD_COL, TRACE_SORT_KEYS
 
     
 

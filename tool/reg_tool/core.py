@@ -209,6 +209,8 @@ def saveh5(target,info_f,info_h5,key):
         g.create_dataset('data', data=target, compression='gzip')
         for key in header.keys():
             g.create_dataset(key, data=header[key], compression='gzip')
+        if "mask" in info_f:
+            g.create_dataset("mask", data=_read_array(info_f, "mask"), compression='gzip')
     return None
 
 def gather(info_f, mode):
@@ -736,7 +738,8 @@ if __name__ == "__main__":
     h5_dirs = set(os.path.dirname(os.path.abspath(p)) for p in (info_h5_raw, info_h5_regular))
     h5_root = sorted(h5_dirs)[0]
     info_h5_target = args.target_h5 or os.path.join(h5_root, "targeth5_binning.h5")
-    patch_dir = args.patch_dir if args.patch_dir else os.path.join(h5_root, "patch")
+    actual_mode = resolved_modes[0]
+    patch_dir = args.patch_dir if args.patch_dir else os.path.join(h5_root, f"patch_{actual_mode}")
     os.makedirs(patch_dir, exist_ok=True)
 
     metric_weights = [float(v) for v in args.metric_weights.split(",")]
@@ -839,7 +842,7 @@ if __name__ == "__main__":
     if not resolved_modes:
         sys.exit(0)
 
-    actual_mode = resolved_modes[0]
+    #actual_mode = resolved_modes[0]
     if actual_mode not in ("anchor_patch", "kdtree", "csg", "crg"):
         raise ValueError(f"unknown post-binning mode: {actual_mode}")
 
@@ -1182,18 +1185,102 @@ if __name__ == "__main__":
                 np.savez(os.path.join(patch_dir, "crg_raw_pool.npz"), pool_idx=raw_gathers)
                 print(f"saved crg_train_pool.npz: {len(crg_reg)} gathers")
 
-            # Build infer_query_context: query = missing, context = observed
-            mask_arr = _read_array(info_f_regular, "mask").astype(bool).reshape(-1) if "mask" in info_f_regular else None
-            if mask_arr is not None:
-                missing_idx = np.flatnonzero(~mask_arr).astype(np.int64)
-                obs_idx = np.flatnonzero(mask_arr).astype(np.int64)
-                print(f"missing: {missing_idx.size}  observed: {obs_idx.size}")
-                np.savez(
-                    os.path.join(patch_dir, "infer_query_context.npz"),
-                    grid_query_idx_list=np.asarray([missing_idx], dtype=object),
-                    context_idx_list=np.asarray([obs_idx], dtype=object),
-                    block_id=np.array([0], dtype=np.int64),
-                    block_center_grid_idx=np.array([-1], dtype=np.int64),
-                    anchor_grid_idx_list=np.asarray([missing_idx], dtype=object),
-                )
+            # Build infer_query_context: mask computed from target_h5 data
+            with File(info_h5_target, "r") as f_tgt:
+                data_arr = f_tgt[args.group_key]["data"][:].astype(np.float32)
+            mask_arr = ~np.all(np.abs(data_arr) < 1e-10, axis=1)
+            print(f"target_h5 mask: true={int(mask_arr.sum())} false={int((~mask_arr).sum())}")
+            if mask_arr.size > 0:
+                if actual_mode == "csg":
+                    query_list = []
+                    context_list = []
+                    skipped = 0
+                    max_q = int(args.num_query) if args.num_query else 16
+                    for k in sorted(csg_reg.keys()):
+                        reg_idxs = csg_reg[k]
+                        raw_idxs = csg_raw.get(k)
+                        if raw_idxs is None or raw_idxs.size == 0:
+                            skipped += 1
+                            continue
+                        missing = reg_idxs[~mask_arr[reg_idxs]]
+                        if missing.size == 0:
+                            skipped += 1
+                            continue
+                        # chunk query into groups of max_q
+                        for start in range(0, missing.size, max_q):
+                            chunk = missing[start:start + max_q]
+                            query_list.append(chunk.astype(np.int64))
+                            context_list.append(raw_idxs.astype(np.int64))
+                    n_infer = len(query_list)
+                    if n_infer == 0:
+                        raise RuntimeError(
+                            "csg: no gather with missing traces; "
+                            f"all {skipped} gathers are fully observed or empty"
+                        )
+                    n_gathers = len(csg_reg) - skipped
+                    print(
+                        f"csg infer: {n_infer} chunks from {n_gathers} gathers "
+                        f"(skipped {skipped}), max_query_per_chunk={max_q}"
+                    )
+                    np.savez(
+                        os.path.join(patch_dir, "infer_query_context.npz"),
+                        grid_query_idx_list=object_array(query_list),
+                        context_idx_list=object_array(context_list),
+                        block_id=np.arange(n_infer, dtype=np.int64),
+                        block_center_grid_idx=np.full(n_infer, -1, dtype=np.int64),
+                        anchor_grid_idx_list=object_array(query_list),
+                    )
+
+                elif actual_mode == "crg":
+                    query_list = []
+                    context_list = []
+                    skipped = 0
+                    max_q = int(args.num_query) if args.num_query else 16
+                    for k in sorted(crg_reg.keys()):
+                        reg_idxs = crg_reg[k]
+                        raw_idxs = crg_raw.get(k)
+                        if raw_idxs is None or raw_idxs.size == 0:
+                            skipped += 1
+                            continue
+                        missing = reg_idxs[~mask_arr[reg_idxs]]
+                        if missing.size == 0:
+                            skipped += 1
+                            continue
+                        for start in range(0, missing.size, max_q):
+                            chunk = missing[start:start + max_q]
+                            query_list.append(chunk.astype(np.int64))
+                            context_list.append(raw_idxs.astype(np.int64))
+                    n_infer = len(query_list)
+                    if n_infer == 0:
+                        raise RuntimeError(
+                            "crg: no gather with missing traces; "
+                            f"all {skipped} gathers are fully observed or empty"
+                        )
+                    n_gathers = len(crg_reg) - skipped
+                    print(
+                        f"crg infer: {n_infer} chunks from {n_gathers} gathers "
+                        f"(skipped {skipped}), max_query_per_chunk={max_q}"
+                    )
+                    np.savez(
+                        os.path.join(patch_dir, "infer_query_context.npz"),
+                        grid_query_idx_list=object_array(query_list),
+                        context_idx_list=object_array(context_list),
+                        block_id=np.arange(n_infer, dtype=np.int64),
+                        block_center_grid_idx=np.full(n_infer, -1, dtype=np.int64),
+                        anchor_grid_idx_list=object_array(query_list),
+                    )
+
+                else:  # kdtree
+                    missing_idx = np.flatnonzero(~mask_arr).astype(np.int64)
+                    obs_idx = np.flatnonzero(mask_arr).astype(np.int64)
+                    print(f"kdtree infer: missing={missing_idx.size}  observed={obs_idx.size}")
+                    np.savez(
+                        os.path.join(patch_dir, "infer_query_context.npz"),
+                        grid_query_idx_list=np.asarray([missing_idx], dtype=object),
+                        context_idx_list=np.asarray([obs_idx], dtype=object),
+                        block_id=np.array([0], dtype=np.int64),
+                        block_center_grid_idx=np.array([-1], dtype=np.int64),
+                        anchor_grid_idx_list=np.asarray([missing_idx], dtype=object),
+                    )
+
                 print("saved infer_query_context.npz")

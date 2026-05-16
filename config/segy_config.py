@@ -135,7 +135,8 @@ SORT_KEYS = ["recv_line", "recv_stake", "shot_line", "shot_stake"]
 COORD_COL = {"sx": 0, "sy": 1, "rx": 2, "ry": 3}
 
 # Default trace sort order for patches (dataset.py)
-TRACE_SORT_KEYS: Tuple[str, ...] = ("rx", "ry", "sx", "sy")
+TRACE_SORT_KEYS: Tuple[str, ...] = ("offset", "azimuth")
+
 
 # Number of coordinate dimensions
 N_COORD_DIMS = 4

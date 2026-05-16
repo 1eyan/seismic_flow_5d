@@ -31,12 +31,12 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from .dataset import DatasetH5_all_queryctx
-from .utils import build_coord_config
-from .model import SeisDiTRopeV2
-from .fpm import FlowMatchingModel
-from .infer import run_queryctx_inference, add_prediction, fit_trace
-from .utils import (
+from dataset import DatasetH5_all_queryctx
+from utils import build_coord_config
+from model import SeisDiTRopeV2
+from fpm import FlowMatchingModel
+from infer import run_queryctx_inference, add_prediction, fit_trace
+from utils import (
     read_segy_headers,
     read_segy_data,
     write_segy_data,
@@ -169,7 +169,7 @@ def save_reports(output_dir: Path, headers, written, unfilled, still_missing,
 
 
 def fill_segy(args, headers, missing_global, pred_sum, pred_count, logger,
-              label_data=None) -> dict:
+              label_data=None, time_ps: int = None) -> dict:
     mask_data = read_segy_data(args.mask_path)
     lookup = build_lookup(headers)
     out = mask_data.copy()
@@ -181,7 +181,7 @@ def fill_segy(args, headers, missing_global, pred_sum, pred_count, logger,
         if not indices:
             unmatched.append(key)
             continue
-        trace = fit_trace(total / max(pred_count[key], 1), ns)
+        trace = fit_trace(total / max(pred_count[key], 1), ns, time_ps=time_ps)
         wrote = False
         for trace_idx in indices:
             if missing_global[trace_idx]:
@@ -462,7 +462,7 @@ def main() -> None:
     # ---- SEGY fill ----
     if is_main:
         summary = fill_segy(args, headers, missing_global, pred_sum, pred_count,
-                            logger, label_data=label_data)
+                            logger, label_data=label_data, time_ps=time_ps)
         summary.update(infer_stats)
         summary["num_gpus"] = world_size
         summary["total_seconds"] = round(time.perf_counter() - total_start, 3)

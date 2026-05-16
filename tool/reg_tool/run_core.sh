@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY_SCRIPT="${SCRIPT_DIR}/core.py"
 
 # ── 从命令行取 mode ──────────────────────────────────────────
-MODE="${MODE:-anchor_patch}"
+MODE="${MODE:-crg}"
 if [[ $# -gt 0 && "$1" != -* ]]; then
     MODE="$1"
     shift
@@ -49,13 +49,13 @@ POOL_SIZE="${POOL_SIZE:-}"
 BLOCK_DIVISORS="${BLOCK_DIVISORS:-6,21,7,5}"
 STRIDE_DIVISORS="${STRIDE_DIVISORS:-6,21,7,5}"
 QUERY_MASK_MODE="${QUERY_MASK_MODE:-regular_true}"
-MAX_QUERY_PER_PATCH="${MAX_QUERY_PER_PATCH:-128}"
+MAX_QUERY_PER_PATCH="${MAX_QUERY_PER_PATCH:-64}"
 GPU_QUERY_CHUNK_SIZE="${GPU_QUERY_CHUNK_SIZE:-128}"
 
 # ── GPU 参数 ──────────────────────────────────────────────────
 # 推理 context 选择距离计算上 GPU (torch batch matmul)
 INFER_USE_GPU="${INFER_USE_GPU:-true}"
-INFER_GPU_DEVICE="${INFER_GPU_DEVICE:-cuda:0}"
+INFER_GPU_DEVICE="${INFER_GPU_DEVICE:-cuda:5}"
 
 # 训练锚点选择: value_based_anchor_sampling 的 kNN 距离矩阵上 GPU
 # 数据集小时(trusted≤VALUE_KNN_FULL_MATRIX_MAX_N)一次性全矩阵，大时分批
@@ -68,11 +68,11 @@ VALUE_KNN_GPU_BATCH_ROWS="${VALUE_KNN_GPU_BATCH_ROWS:-512}"
 VALUE_KNN_FULL_MATRIX_MAX_N="${VALUE_KNN_FULL_MATRIX_MAX_N:-4096}"
 
 # ── 开关 ──────────────────────────────────────────────────────
-ENABLE_AUTO_PARAMS="${ENABLE_AUTO_PARAMS:-true}"
+ENABLE_AUTO_PARAMS="${ENABLE_AUTO_PARAMS:-fasle}"
 AUTO_PARAMS_ANCHOR_STRIDE="${AUTO_PARAMS_ANCHOR_STRIDE:-128}"
 RAW_KEY_AGGREGATE="${RAW_KEY_AGGREGATE:-mean}"
 GREEDY_FILL_UNCOVERED="${GREEDY_FILL_UNCOVERED:-true}"
-SKIP_TRAIN="${SKIP_TRAIN:-false}"
+SKIP_TRAIN="${SKIP_TRAIN:-true}"
 SKIP_INFER="${SKIP_INFER:-false}"
 
 # ── 构建 ARGS ─────────────────────────────────────────────────

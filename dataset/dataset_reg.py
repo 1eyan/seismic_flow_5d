@@ -14,21 +14,10 @@ Dependencies:
 from typing import Any, Dict, Optional, Tuple
 import numpy as np
 from h5py import File
+from utils.sampler_utils import diverse_topk
+from config.data_config import object_args as _default_args
+from config.segy_config import COORD_COL as _COORD_COL, TRACE_SORT_KEYS
 
-try:
-    from ..utils.sampler_utils import diverse_topk
-except ImportError:
-    from queryctx_module.utils.sampler_utils import diverse_topk
-
-try:
-    from ..config.data_config import object_args as _default_args
-except ImportError:
-    from queryctx_module.config.data_config import object_args as _default_args
-
-try:
-    from ..config.segy_config import COORD_COL as _COORD_COL, TRACE_SORT_KEYS
-except ImportError:
-    from config.segy_config import COORD_COL as _COORD_COL, TRACE_SORT_KEYS
 
 
 def amplitude_metadata(thres: float, clip_percentile: float = 99.5) -> Dict[str, Any]:
@@ -74,10 +63,9 @@ class DatasetH5_all_queryctx:
         use_p_scale: bool = False,
         time_ps: int = 1256,
         trace_ps: int = 128,
+        epoch_repeat: int = 1,
     ):
         super().__init__()
-        print("Loading dataset...")
-
         self.h5File = h5File
         self.h5File_regular = h5File_regular
         self.h5File_tgt = h5File_tgt
@@ -93,6 +81,9 @@ class DatasetH5_all_queryctx:
         self.patch_beta = float(patch_beta)
         self.patch_metric_weights = patch_metric_weights
         self.force_anchor_query = bool(force_anchor_query)
+        self.epoch_repeat = int(max(1, epoch_repeat))
+        self.num_anchors = None  # set after metadata load for train_pool mode
+
         self.trace_sort_keys = tuple(trace_sort_keys)
         self.use_p_scale = use_p_scale
 
@@ -113,8 +104,17 @@ class DatasetH5_all_queryctx:
         self.patch_meta = self._load_patch_metadata(dataset_neighbors)
         self.patch_mode = self.patch_meta["mode"]
         print(self.patch_mode)
-        self.num_samples = int(self.patch_meta["num_samples"])
-        print(f"patch metadata mode: {self.patch_mode}, samples: {self.num_samples}")
+        base_samples = int(self.patch_meta["num_samples"])
+        if self.train and self.patch_mode == "train_pool" and self.epoch_repeat > 1:
+            self.num_anchors = base_samples
+            self.num_samples = base_samples * self.epoch_repeat
+            print(f"patch metadata mode: {self.patch_mode}, anchors={self.num_anchors}, "
+                  f"samples={self.num_samples} (epoch_repeat={self.epoch_repeat})")
+        else:
+            self.num_samples = base_samples
+            if self.patch_mode == "train_pool":
+                self.num_anchors = base_samples
+            print(f"patch metadata mode: {self.patch_mode}, samples: {self.num_samples}")
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -154,11 +154,8 @@ class DatasetH5_all_queryctx:
         if path is None:
             raise ValueError("dataset_neighbors is required")
         raw = np.load(path, allow_pickle=True)
-        if hasattr(raw, "files"):
-            arrays = {k: raw[k] for k in raw.files}
-            raw.close()
-        else:
-            arrays = {"0": raw}
+        arrays = {k: raw[k] for k in raw.files}
+        raw.close()
 
         if "grid_query_idx_list" in arrays and (
             "context_idx_list" in arrays or "patch_idx_list" in arrays
@@ -185,34 +182,10 @@ class DatasetH5_all_queryctx:
                 "anchor_idx": arrays.get("anchor_idx"),
             }
 
-        if "patch_idx_2d" in arrays and self.train:
-            patch_idx_2d = np.asarray(arrays["patch_idx_2d"], dtype=np.int64)
-            return {
-                "mode": "train_pool",
-                "num_samples": int(patch_idx_2d.shape[0]),
-                "pool_idx_2d": patch_idx_2d,
-                "anchor_idx": arrays.get("anchor_idx"),
-            }
-
-        if "patch_idx_2d" in arrays and (not self.train):
-            patch_idx_2d = np.asarray(arrays["patch_idx_2d"], dtype=np.int64)
-            return {
-                "mode": "legacy",
-                "num_samples": int(patch_idx_2d.shape[0]),
-                "patch_idx_2d": patch_idx_2d,
-            }
-
-        if "0" in arrays:
-            patch_idx_2d = np.asarray(arrays["0"], dtype=np.int64)
-            return {
-                "mode": "legacy",
-                "num_samples": int(patch_idx_2d.shape[0]),
-                "patch_idx_2d": patch_idx_2d,
-            }
-
         raise ValueError(
-            "Unsupported dataset_neighbors format. Expected legacy ['0'], "
-            "train pool keys, or infer query/context keys."
+            "Unsupported dataset_neighbors format. "
+            "Expected infer_query_context (grid_query_idx_list + context_idx_list/patch_idx_list) "
+            "or train_pool (pool_idx_2d)."
         )
 
     # ------------------------------------------------------------------
@@ -297,7 +270,21 @@ class DatasetH5_all_queryctx:
         if not self.trace_sort_keys:
             order = np.arange(data_patch.shape[0])
             return data_patch, is_query, coords_patch, order
-        cols = [coords_patch[:, self._COORD_COL[k]] for k in reversed(self.trace_sort_keys)]
+        cols = []
+        for k in reversed(self.trace_sort_keys):
+            if k == "offset":
+                col = np.sqrt(
+                    (coords_patch[:, 0] - coords_patch[:, 2]) ** 2
+                    + (coords_patch[:, 1] - coords_patch[:, 3]) ** 2
+                ).astype(np.float32)
+            elif k == "azimuth":
+                col = np.arctan2(
+                    coords_patch[:, 1] - coords_patch[:, 3],
+                    coords_patch[:, 0] - coords_patch[:, 2],
+                ).astype(np.float32)
+            else:
+                col = coords_patch[:, self._COORD_COL[k]]
+            cols.append(col)
         order = np.lexsort(cols)
         return data_patch[order], is_query[order], coords_patch[order], order
 
@@ -375,12 +362,15 @@ class DatasetH5_all_queryctx:
     # ------------------------------------------------------------------
 
     def _build_train_query_context_sample(self, idx: int) -> Dict[str, Any]:
-        pool_idx = self._index_row(self.patch_meta["pool_idx_2d"], idx)
+        # When epoch_repeat > 1, fold idx back into anchor range;
+        # keep original idx for random seed (diversity across repeats).
+        anchor_row = idx % self.num_anchors if self.num_anchors is not None else idx
+        pool_idx = self._index_row(self.patch_meta["pool_idx_2d"], anchor_row)
         if pool_idx.size < 2:
             raise RuntimeError("train pool must contain at least 2 traces")
         anchor_idx = None
         if self.patch_meta.get("anchor_idx") is not None:
-            anchor_idx = int(np.asarray(self.patch_meta["anchor_idx"])[idx])
+            anchor_idx = int(np.asarray(self.patch_meta["anchor_idx"])[anchor_row])
 
         data_pool = self._crop_or_pad_time(
             self._take_rows(self.h5_data["data"], pool_idx)
@@ -587,6 +577,345 @@ class DatasetH5_all_queryctx:
 
 
 # ------------------------------------------------------------------
+# CSG/CRG gather-based dataset
+# ------------------------------------------------------------------
+
+
+class DatasetH5CSGCRG(DatasetH5_all_queryctx):
+    """CSG/CRG gather-based dataset for seismic interpolation.
+
+    Extends ``DatasetH5_all_queryctx`` to support variable-length gather pools
+    produced by ``core.py`` csg / crg modes.
+
+    Training mode (``train_gather``):
+        Each sample corresponds to one gather (common-shot or common-receiver).
+        Within the gather, query traces are randomly sampled; context traces
+        are selected via ``diverse_topk`` from the remaining traces in the
+        same gather. This is analogous to ``train_pool`` but the pool comes
+        from a 1D object array (variable-length per gather) instead of a
+        fixed-width 2D array.
+
+    Inference mode (``infer_query_context``):
+        Identical to ``DatasetH5_all_queryctx`` — uses precomputed
+        grid-query and context index pairs from ``infer_query_context.npz``.
+
+    Compatible npz formats (checked in order):
+
+    * ``infer_query_context.npz`` — keys: ``grid_query_idx_list``,
+      ``context_idx_list`` / ``patch_idx_list`` (inference, all core.py modes)
+    * ``train_pool_idx_2d.npz`` — key: ``pool_idx_2d`` (2D, anchor_patch / kdtree)
+    * ``csg_raw_pool.npz`` / ``crg_raw_pool.npz`` — key: ``pool_idx``
+      (1D object array, csg / crg training)
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    # ------------------------------------------------------------------
+    # Metadata (extends parent with 1D object-array pool_idx)
+    # ------------------------------------------------------------------
+
+    def _load_patch_metadata(self, path: Optional[str]) -> Dict[str, Any]:
+        # Try parent formats first (infer_query_context / pool_idx_2d)
+        try:
+            return super()._load_patch_metadata(path)
+        except ValueError:
+            pass
+
+        raw = np.load(path, allow_pickle=True)
+        arrays = {k: raw[k] for k in raw.files}
+        raw.close()
+
+        # csg / crg: 1D object array of variable-length gather indices
+        if "pool_idx" in arrays:
+            pool_idx_arr = arrays["pool_idx"]
+            if not isinstance(pool_idx_arr, np.ndarray) or pool_idx_arr.dtype != object:
+                raise ValueError("pool_idx must be a 1D object-dtype ndarray")
+            if pool_idx_arr.ndim != 1:
+                raise ValueError(
+                    f"pool_idx must be 1D, got shape {pool_idx_arr.shape}"
+                )
+            if pool_idx_arr.shape[0] == 0:
+                raise ValueError("pool_idx is empty")
+            return {
+                "mode": "train_gather",
+                "num_samples": int(pool_idx_arr.shape[0]),
+                "pool_idx": pool_idx_arr,
+                "pool_key": arrays.get("pool_key"),
+            }
+
+        raise ValueError(
+            "Unsupported dataset_neighbors format. "
+            "Expected infer_query_context, train_pool (pool_idx_2d), "
+            "or train_gather (pool_idx as 1D object array)."
+        )
+
+    # ------------------------------------------------------------------
+    # Training sample builder (gather-based)
+    # ------------------------------------------------------------------
+
+    def _build_train_gather_sample(self, idx: int) -> Dict[str, Any]:
+        """Build a query-context training sample from a single gather.
+
+        1. Select a gather deterministically from *idx* (linear-probe past
+           gathers that are too small).
+        2. Sub-sample if the gather exceeds ``trace_ps * 4`` traces.
+        3. Randomly pick *train_num_query* query traces; the rest become
+           context candidates.
+        4. Run ``diverse_topk`` on the candidate coordinates.
+        5. Assemble, sort, mask, scale → return the standard sample dict.
+        """
+        pool_idx_arr = self.patch_meta["pool_idx"]  # 1D object array
+        n_gathers = int(pool_idx_arr.shape[0])
+
+        # ── pick a gather with enough traces ──
+        start_gather = idx % n_gathers
+        pool = None
+        for offset in range(n_gathers):
+            g_idx = (start_gather + offset) % n_gathers
+            candidate = np.asarray(pool_idx_arr[g_idx], dtype=np.int64).reshape(-1)
+            if candidate.size >= self.train_num_query + 1:
+                pool = candidate
+                break
+
+        if pool is None:
+            raise RuntimeError(
+                f"no gather has at least {self.train_num_query + 1} traces "
+                f"(total gathers: {n_gathers})"
+            )
+
+        rng = self._sample_rng(idx)
+
+        # ── subsample over-sized pools ──
+        max_pool = max(self.trace_ps * 4, self.train_num_query + 1)
+        if pool.size > max_pool:
+            pool = np.sort(rng.choice(pool, max_pool, replace=False)).astype(np.int64)
+
+        # ── load pool data + coords ──
+        data_pool = self._crop_or_pad_time(
+            self._take_rows(self.h5_data["data"], pool)
+        ).astype(np.float32)
+        rx_pool = self._take_rows(self.h5_data["rx"], pool).astype(np.float32)
+        ry_pool = self._take_rows(self.h5_data["ry"], pool).astype(np.float32)
+        sx_pool = self._take_rows(self.h5_data["sx"], pool).astype(np.float32)
+        sy_pool = self._take_rows(self.h5_data["sy"], pool).astype(np.float32)
+
+        sx_n, sy_n, rx_n, ry_n = self._normalize_coords(
+            sx_pool, sy_pool, rx_pool, ry_pool
+        )
+        coords_pool = np.stack([sx_n, sy_n, rx_n, ry_n], axis=1).astype(np.float32)
+
+        # ── sample query traces ──
+        q_eff = min(self.train_num_query, int(pool.size) - 1)
+        perm = rng.permutation(pool.size)
+        query_local = perm[:q_eff].astype(np.int64, copy=False)
+
+        # ── context candidates (remaining traces) ──
+        mask = np.ones(pool.size, dtype=bool)
+        mask[query_local] = False
+        candidate_local = np.flatnonzero(mask).astype(np.int64)
+
+        k_ctx_target = (
+            max(1, self.trace_ps - q_eff)
+            if self.train_context_size is None
+            else self.train_context_size
+        )
+        k_ctx = min(int(k_ctx_target), int(candidate_local.size))
+
+        # ── diverse context selection ──
+        center_coord = np.mean(coords_pool[query_local], axis=0).astype(
+            np.float32, copy=False
+        )
+        context_local = diverse_topk(
+            center_coord=center_coord,
+            candidate_idx=candidate_local,
+            all_coords=coords_pool,
+            k=k_ctx,
+            metric_weights=self.patch_metric_weights,
+            beta=self.patch_beta,
+        ).astype(np.int64, copy=False)
+
+        # ── assemble patch ──
+        patch_local = np.concatenate([query_local, context_local], axis=0)
+        data_patch = data_pool[patch_local].astype(np.float32, copy=False)
+        is_query_orig = np.zeros((patch_local.size,), dtype=bool)
+        is_query_orig[: query_local.size] = True
+
+        coords_patch = coords_pool[patch_local].astype(np.float32, copy=False)
+        data_patch, is_query, coords_patch, _ = self._sort_traces(
+            data_patch, is_query_orig, coords_patch
+        )
+
+        masked_patch = data_patch.copy()
+        masked_patch[is_query] = 0.0
+        data_patch, masked_patch, std_val, thres = self._scale_pair(
+            data_patch, masked_patch, is_query
+        )
+
+        return {
+            "data": data_patch,
+            "masked_patch": masked_patch,
+            "rx_patch": coords_patch[:, 2].astype(np.float32, copy=False),
+            "ry_patch": coords_patch[:, 3].astype(np.float32, copy=False),
+            "sx_patch": coords_patch[:, 0].astype(np.float32, copy=False),
+            "sy_patch": coords_patch[:, 1].astype(np.float32, copy=False),
+            "time_axis_2d": self._time_axis_2d(patch_local.size),
+            "std_val": std_val,
+            "is_query": is_query,
+            "query_count": np.int64(query_local.size),
+            "context_count": np.int64(context_local.size),
+            "query_global_idx": pool[query_local].astype(np.int64, copy=False),
+            "context_global_idx": pool[context_local].astype(np.int64, copy=False),
+            "pool_global_idx": pool.astype(np.int64, copy=False),
+            "anchor_global_idx": np.int64(-1),
+            **amplitude_metadata(thres),
+        }
+
+    # ------------------------------------------------------------------
+    # Inference sample builder (with context subsampling)
+    # ------------------------------------------------------------------
+
+    def _build_infer_query_context_sample(self, idx: int) -> Dict[str, Any]:
+        """Override parent: subsample large-context gather to trace_ps traces.
+
+        Unlike the parent which concatenates *all* context traces, this
+        loads only context *coordinates* first, runs ``diverse_topk`` to
+        pick ``trace_ps - len(query)`` diverse context traces, then loads
+        data for the selected subset.  This keeps per-sample trace count
+        aligned with training.
+        """
+        query_idx = self._index_row(self.patch_meta["grid_query_idx_list"], idx)
+        context_idx_full = self._index_row(self.patch_meta["context_idx_list"], idx)
+        if query_idx.size == 0 or context_idx_full.size == 0:
+            raise RuntimeError("infer sample must contain non-empty query and context")
+
+        # ── query data + coords (≤ max_query_per_chunk, already small) ──
+        query_data = self._crop_or_pad_time(
+            self._take_rows(self.h5_data_regular["data"], query_idx)
+        ).astype(np.float32)
+        rx_q = self._take_rows(self.h5_data_regular["rx"], query_idx).astype(np.float32)
+        ry_q = self._take_rows(self.h5_data_regular["ry"], query_idx).astype(np.float32)
+        sx_q = self._take_rows(self.h5_data_regular["sx"], query_idx).astype(np.float32)
+        sy_q = self._take_rows(self.h5_data_regular["sy"], query_idx).astype(np.float32)
+        sx_qn, sy_qn, rx_qn, ry_qn = self._normalize_coords(sx_q, sy_q, rx_q, ry_q)
+        coords_q = np.stack([sx_qn, sy_qn, rx_qn, ry_qn], axis=1).astype(np.float32)
+
+        # ── context: load coords only for diverse_topk, not data yet ──
+        rx_c_all = self._take_rows(self.h5_data["rx"], context_idx_full).astype(np.float32)
+        ry_c_all = self._take_rows(self.h5_data["ry"], context_idx_full).astype(np.float32)
+        sx_c_all = self._take_rows(self.h5_data["sx"], context_idx_full).astype(np.float32)
+        sy_c_all = self._take_rows(self.h5_data["sy"], context_idx_full).astype(np.float32)
+        sx_cn, sy_cn, rx_cn, ry_cn = self._normalize_coords(
+            sx_c_all, sy_c_all, rx_c_all, ry_c_all
+        )
+        coords_c_all = np.stack([sx_cn, sy_cn, rx_cn, ry_cn], axis=1).astype(np.float32)
+
+        # ── diverse context selection ──
+        k_ctx = min(self.trace_ps - int(query_idx.size), int(context_idx_full.size))
+        if k_ctx < 1:
+            raise RuntimeError(
+                f"trace_ps={self.trace_ps} too small: query={query_idx.size} "
+                f"leaves no room for context"
+            )
+        if k_ctx < int(context_idx_full.size):
+            center_coord = np.mean(coords_q, axis=0).astype(np.float32, copy=False)
+            context_local = diverse_topk(
+                center_coord=center_coord,
+                candidate_idx=np.arange(context_idx_full.size, dtype=np.int64),
+                all_coords=coords_c_all,
+                k=k_ctx,
+                metric_weights=self.patch_metric_weights,
+                beta=self.patch_beta,
+            ).astype(np.int64, copy=False)
+        else:
+            context_local = np.arange(context_idx_full.size, dtype=np.int64)
+
+        context_idx = context_idx_full[context_local]
+        coords_c = coords_c_all[context_local]
+
+        # ── context data (selected subset only) ──
+        context_data = self._crop_or_pad_time(
+            self._take_rows(self.h5_data["data"], context_idx)
+        ).astype(np.float32)
+
+        # ── assemble patch ──
+        data_patch = np.concatenate([query_data, context_data], axis=0).astype(
+            np.float32, copy=False
+        )
+        is_query_orig = np.zeros((data_patch.shape[0],), dtype=bool)
+        is_query_orig[: query_idx.size] = True
+
+        coords_patch = np.concatenate([coords_q, coords_c], axis=0).astype(np.float32)
+        data_patch, is_query, coords_patch, _order = self._sort_traces(
+            data_patch, is_query_orig, coords_patch
+        )
+
+        masked_patch = data_patch.copy()
+        masked_patch[is_query] = 0.0
+        data_raw = data_patch.astype(np.float32, copy=True)
+        masked_raw = masked_patch.astype(np.float32, copy=True)
+        data_patch, masked_patch, std_val, thres = self._scale_pair(
+            data_patch, masked_patch, is_query
+        )
+
+        # ── patch_info (header fields, reorder to match sort) ──
+        sl_q = self._take_rows(self.h5_data_regular["shot_line"], query_idx)
+        ss_q = self._take_rows(self.h5_data_regular["shot_stake"], query_idx)
+        rl_q = self._take_rows(self.h5_data_regular["recv_line"], query_idx)
+        rs_q = self._take_rows(self.h5_data_regular["recv_stake"], query_idx)
+        sl_c = self._take_rows(self.h5_data["shot_line"], context_idx)
+        ss_c = self._take_rows(self.h5_data["shot_stake"], context_idx)
+        rl_c = self._take_rows(self.h5_data["recv_line"], context_idx)
+        rs_c = self._take_rows(self.h5_data["recv_stake"], context_idx)
+        patch_info = {
+            "shot_line": np.concatenate([sl_q, sl_c])[_order],
+            "shot_stake": np.concatenate([ss_q, ss_c])[_order],
+            "recv_line": np.concatenate([rl_q, rl_c])[_order],
+            "recv_stake": np.concatenate([rs_q, rs_c])[_order],
+        }
+
+        out = {
+            "data": data_patch,
+            "masked_patch": masked_patch,
+            "rx_patch": coords_patch[:, 2].astype(np.float32, copy=False),
+            "ry_patch": coords_patch[:, 3].astype(np.float32, copy=False),
+            "sx_patch": coords_patch[:, 0].astype(np.float32, copy=False),
+            "sy_patch": coords_patch[:, 1].astype(np.float32, copy=False),
+            "time_axis_2d": self._time_axis_2d(data_patch.shape[0]),
+            "std_val": std_val,
+            "is_query": is_query,
+            "query_count": np.int64(query_idx.size),
+            "context_count": np.int64(context_idx.size),
+            "grid_query_idx": query_idx.astype(np.int64, copy=False),
+            "context_idx": context_idx.astype(np.int64, copy=False),
+            "patch_info": patch_info,
+            "data_raw": data_raw,
+            "masked_patch_raw": masked_raw,
+            **amplitude_metadata(thres),
+        }
+        if self.patch_meta.get("block_id") is not None:
+            out["block_id"] = np.int64(np.asarray(self.patch_meta["block_id"])[idx])
+        if self.patch_meta.get("block_center_grid_idx") is not None:
+            out["block_center_grid_idx"] = np.int64(
+                np.asarray(self.patch_meta["block_center_grid_idx"])[idx]
+            )
+        if self.patch_meta.get("anchor_grid_idx_list") is not None:
+            out["anchor_grid_idx"] = self._index_row(
+                self.patch_meta["anchor_grid_idx_list"], idx
+            )
+        return out
+
+    # ------------------------------------------------------------------
+    # __getitem__ dispatch
+    # ------------------------------------------------------------------
+
+    def __getitem__(self, idx):
+        if self.patch_mode == "train_gather":
+            return self._build_train_gather_sample(idx)
+        return super().__getitem__(idx)
+
+
+# ------------------------------------------------------------------
 # Convenience: batch parsing helper
 # ------------------------------------------------------------------
 
@@ -617,3 +946,5 @@ def batch_to_xy(batch):
             batch["sy_patch"],
         )
     return None
+
+

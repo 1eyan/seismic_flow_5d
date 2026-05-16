@@ -37,11 +37,12 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 # -- internal (self-contained) --
-from .dataset import DatasetH5_all_queryctx
-from .config.data_config import get_parser
-from .utils import build_coord_config
-from .model import SeisDiTRopeV2
-from .fpm import FlowMatchingModel
+
+from dataset import DatasetH5_all_queryctx
+from config.data_config import get_parser
+from utils import build_coord_config
+from model import SeisDiTRopeV2
+from fpm import FlowMatchingModel
 
 
 # ---------------------------------------------------------------------------
@@ -407,20 +408,29 @@ def main():
 
     # ---- Dataset ----
     trace_sort_keys = tuple(args.trace_sort_keys.split(","))
-    dataset = DatasetH5_all_queryctx(
-        h5File=args.h5File,
-        h5File_regular=args.h5File_regular,
-        dataset_neighbors=args.dataset_neighbors_train,
-        train=True,
-        train_num_query=args.train_num_query,
-        train_context_size=args.train_context_size,
-        patch_beta=args.patch_beta,
-        force_anchor_query=args.force_anchor_query,
-        trace_sort_keys=trace_sort_keys,
-        use_p_scale=args.use_p_scale,
-        time_ps=args.time_ps,
-        trace_ps=args.trace_ps,
-    )
+
+    if rank != 0:
+        _real_stdout = sys.stdout
+        sys.stdout = open(os.devnull, "w")
+    try:
+        dataset = DatasetH5_all_queryctx(
+            h5File=args.h5File,
+            h5File_regular=args.h5File_regular,
+            dataset_neighbors=args.dataset_neighbors_train,
+            train=True,
+            train_num_query=args.train_num_query,
+            train_context_size=args.train_context_size,
+            patch_beta=args.patch_beta,
+            force_anchor_query=args.force_anchor_query,
+            trace_sort_keys=trace_sort_keys,
+            use_p_scale=args.use_p_scale,
+            time_ps=args.time_ps,
+            trace_ps=args.trace_ps,
+            epoch_repeat=args.epoch_repeat,
+        )
+    finally:
+        if rank != 0:
+            sys.stdout = _real_stdout
 
     if rank == 0:
         print(f"[queryctx] time_ps={dataset.time_ps} trace_ps={dataset.trace_ps} "

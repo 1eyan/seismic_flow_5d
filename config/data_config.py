@@ -92,8 +92,14 @@ _g.add_argument(
 _g.add_argument(
     "--trace_sort_keys",
     type=str,
-    default="rx,ry,sx,sy",
-    help="Comma-separated coordinate sort order",
+    default="offset,azimuth",
+    help="Comma-separated coordinate sort order (offset,azimuth,sx,sy,rx,ry)",
+)
+_g.add_argument(
+    "--epoch_repeat",
+    type=int,
+    default=6,
+    help="Repeat each anchor this many times per epoch (with different random seeds for diversity)",
 )
 _g.add_argument(
     "--use_phys_omega",

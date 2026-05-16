@@ -9,14 +9,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
 # ---- GPU ----
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
-NUM_GPUS="${NUM_GPUS:-2}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5,6,7}"
+NUM_GPUS="${NUM_GPUS:-4}"
 
 # ---- Training ----
 MODEL_NAME="${MODEL_NAME:-trace_axis}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
 LR="${LR:-1e-4}"
-EPOCHS="${EPOCHS:-200}"
+EPOCHS="${EPOCHS:-300}"
 SEED="${SEED:-515}"
 DATA_TYPE="${DATA_TYPE:-df_field1031_5d}"
 
@@ -26,16 +26,17 @@ USE_MISSING_EMBEDDING="${USE_MISSING_EMBEDDING:-false}"
 USE_PHYS_OMEGA="${USE_PHYS_OMEGA:-true}"
 
 # ---- Data ----
-H5_FILE="${H5_FILE:-${ROOT_DIR}/data/raw5d_data.h5}"
-H5_FILE_REGULAR="${H5_FILE_REGULAR:-${ROOT_DIR}/data/reg5dbin_label.h5}"
-DATASET_NEIGHBORS_TRAIN="${DATASET_NEIGHBORS_TRAIN:-${ROOT_DIR}/data/train_pool_idx_2d.npz}"
+H5_DIR="${H5_DIR:-/data/shared/测试数据/h5}"
+H5_FILE="${H5_FILE:-${H5_DIR}/field1031_irregular.h5}"
+H5_FILE_REGULAR="${H5_FILE_REGULAR:-${H5_DIR}/field1031_label.h5}"
+DATASET_NEIGHBORS_TRAIN="${DATASET_NEIGHBORS_TRAIN:-${H5_DIR}/patch_anchor_patch/train_pool_idx_2d.npz}"
 
 # ---- Queryctx ----
 TRAIN_NUM_QUERY="${TRAIN_NUM_QUERY:-32}"
 TRAIN_CONTEXT_SIZE="${TRAIN_CONTEXT_SIZE:-}"
 PATCH_BETA="${PATCH_BETA:-0.3}"
 FORCE_ANCHOR_QUERY="${FORCE_ANCHOR_QUERY:-false}"
-TRACE_SORT_KEYS="${TRACE_SORT_KEYS:-rx,ry,sx,sy}"
+TRACE_SORT_KEYS="${TRACE_SORT_KEYS:-offset,azimuth}"
 
 TIME_PS="${TIME_PS:-1256}"
 TRACE_PS="${TRACE_PS:-128}"
@@ -45,6 +46,7 @@ echo "======================================"
 echo "FPM V3 Training — queryctx + trace_axis"
 echo "GPU: ${CUDA_VISIBLE_DEVICES}  |  Num: ${NUM_GPUS}"
 echo "Model: trace_axis  |  Batch: ${BATCH_SIZE}  |  LR: ${LR}  |  Epochs: ${EPOCHS}"
+echo "H5_DIR:     ${H5_DIR}"
 echo "H5 irregular: ${H5_FILE}"
 echo "H5 regular:   ${H5_FILE_REGULAR}"
 echo "neighbors:    ${DATASET_NEIGHBORS_TRAIN}"

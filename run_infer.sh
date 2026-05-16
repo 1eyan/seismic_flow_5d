@@ -9,19 +9,20 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
 # ---- GPU ----
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 NUM_GPUS="${NUM_GPUS:-2}"
 MASTER_PORT="${MASTER_PORT:-29502}"
 
 # ---- Model checkpoint ----
-CHECKPOINT="${CHECKPOINT:-${ROOT_DIR}/results/checkpoints/model-20.pth}"
+CHECKPOINT="${CHECKPOINT:-/home/chengzhitong/5d_regular/seismic_transformer_5d/resultsFPM/trace_axis_datatype_df_field1031_5d_queryctx/checkpoints/model-5.pth}"
 
 # ---- Data ----
-H5_IRREGULAR="${H5_IRREGULAR:-${ROOT_DIR}/data/raw5d_data.h5}"
-H5_REGULAR="${H5_REGULAR:-${ROOT_DIR}/data/reg5dbin_label.h5}"
-H5_MASK="${H5_MASK:-${ROOT_DIR}/data/reg5dbin_label_binning.h5}"
-MASK_SEGY="${MASK_SEGY:-${ROOT_DIR}/data/mask.sgy}"
-DATASET_NEIGHBORS_INFER="${DATASET_NEIGHBORS_INFER:-${ROOT_DIR}/data/infer_query_context.npz}"
+H5_DIR="${H5_DIR:-/data/shared/测试数据/h5}"
+H5_IRREGULAR="${H5_IRREGULAR:-${H5_DIR}/field1031_irregular.h5}"
+H5_REGULAR="${H5_REGULAR:-${H5_DIR}/field1031_label.h5}"
+H5_MASK="${H5_MASK:-${H5_DIR}/field1031_mask.h5}"
+MASK_SEGY="${MASK_SEGY:-/data/shared/测试数据/mask_from_label.sgy}"
+DATASET_NEIGHBORS_INFER="${DATASET_NEIGHBORS_INFER:-${H5_DIR}/patch_anchor_patch/infer_query_context.npz}"
 LABEL_SEGY="${LABEL_SEGY:-}"
 
 # ---- Output ----
@@ -31,7 +32,7 @@ OUTPUT_RESIDUAL_SEGY="${OUTPUT_RESIDUAL_SEGY:-${OUTPUT_DIR}/residual.sgy}"
 
 # ---- Inference params ----
 DEVICE="${DEVICE:-cuda:0}"
-BATCH_SIZE="${BATCH_SIZE:-6}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
 TIME_PS="${TIME_PS:-1256}"
 TRACE_PS="${TRACE_PS:-128}"
 HEADER_MODE="${HEADER_MODE:-fixed}"
@@ -94,6 +95,7 @@ else
   echo "FPM V3 Inference — queryctx (single GPU)"
 fi
 echo "checkpoint:    ${CHECKPOINT}"
+echo "H5_DIR:        ${H5_DIR}"
 echo "h5_irregular:  ${H5_IRREGULAR}"
 echo "h5_regular:    ${H5_REGULAR}"
 echo "h5_mask:       ${H5_MASK}"

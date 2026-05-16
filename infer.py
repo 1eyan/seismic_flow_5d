@@ -79,13 +79,37 @@ def add_prediction(pred_sum, pred_count, key, trace):
     pred_count[key] += 1
 
 
-def fit_trace(trace: np.ndarray, ns: int) -> np.ndarray:
-    """Trim or right-pad a trace to exactly ``ns`` samples."""
+def fit_trace(trace: np.ndarray, ns: int, time_ps: Optional[int] = None) -> np.ndarray:
+    """Resize a trace to exactly *ns* samples, inverting ``_crop_or_pad_time``.
+
+    When *time_ps* is provided, the trace is assumed to be *time_ps* samples long
+    and this function recovers the original *ns*-sample layout by undoing the
+    dataset time transformation:
+
+    - ``ns > time_ps``: dataset kept the **last** *time_ps* samples
+      (crop from left).  Inverse: prepend zeros on the left.
+    - ``ns < time_ps``: dataset **left-padded** with zeros.
+      Inverse: keep the **last** *ns* samples.
+
+    When *time_ps* is ``None`` (legacy / simple resize), trims from the left
+    or right-pads.
+    """
     trace = np.asarray(trace, dtype=np.float32).reshape(-1)
+
+    if time_ps is not None and trace.size != ns:
+        if ns > time_ps:
+            # dataset: traces[:, diff:]  →  dropped first diff, kept last
+            return np.pad(trace, (ns - time_ps, 0), constant_values=0).astype(np.float32)
+        elif ns < time_ps:
+            # dataset: left-padded (time_ps - ns) zeros at beginning
+            return trace[time_ps - ns:].astype(np.float32)
+        return trace.astype(np.float32)
+
+    # Simple length-matching (legacy path)
     if trace.size > ns:
         return trace[:ns]
     if trace.size < ns:
-        return np.pad(trace, (0, ns - trace.size)).astype(np.float32)
+        return np.pad(trace, (0, ns - trace.size), constant_values=0).astype(np.float32)
     return trace
 
 
@@ -259,10 +283,10 @@ def run_queryctx_inference(
         x_batch, c_batch, scales, valid, meta_list = _build_batch(sample_buf)
         B = x_batch.shape[0]
         _, max_tr, T = x_batch.shape
-
+        print(max_tr)
         # Update model shape info (required by some FlowMatchingModel impls)
-        if hasattr(fpm.model, "trace_num"):
-            fpm.model.trace_num = max_tr
+        #if hasattr(fpm.model, "trace_num"):
+        fpm.trace_num = max_tr
         fpm.time_steps = T
         fpm.sample_num = B
 

@@ -1,6 +1,6 @@
 # dataset package — PyTorch Dataset classes for seismic interpolation
 
-from .dataset import (
+from .dataset_reg import (
     DatasetH5_all_queryctx,
     amplitude_metadata,
 )
