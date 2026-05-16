@@ -1195,26 +1195,26 @@ if __name__ == "__main__":
                     query_list = []
                     context_list = []
                     skipped = 0
-                    max_q = int(args.num_query) if args.num_query else 16
+                    max_q = int(args.num_query) if args.num_query else 48
                     for k in sorted(csg_reg.keys()):
                         reg_idxs = csg_reg[k]
-                        raw_idxs = csg_raw.get(k)
-                        if raw_idxs is None or raw_idxs.size == 0:
+                        raw_idxs = csg_raw[k]
+                        mask_g = mask_arr[reg_idxs]
+                        missing = reg_idxs[~mask_g]
+                        observed = raw_idxs[mask_g]
+                        if missing.size == 0 or observed.size == 0:
                             skipped += 1
                             continue
-                        missing = reg_idxs[~mask_arr[reg_idxs]]
-                        if missing.size == 0:
-                            skipped += 1
-                            continue
-                        # chunk query into groups of max_q
+                        # chunk query into groups of max_q;
+                        # all chunks share the same observed raw-H5 positions
                         for start in range(0, missing.size, max_q):
                             chunk = missing[start:start + max_q]
                             query_list.append(chunk.astype(np.int64))
-                            context_list.append(raw_idxs.astype(np.int64))
+                            context_list.append(observed.astype(np.int64))
                     n_infer = len(query_list)
                     if n_infer == 0:
                         raise RuntimeError(
-                            "csg: no gather with missing traces; "
+                            "csg: no gather with both missing and observed traces; "
                             f"all {skipped} gathers are fully observed or empty"
                         )
                     n_gathers = len(csg_reg) - skipped
@@ -1235,25 +1235,24 @@ if __name__ == "__main__":
                     query_list = []
                     context_list = []
                     skipped = 0
-                    max_q = int(args.num_query) if args.num_query else 16
+                    max_q = 48
                     for k in sorted(crg_reg.keys()):
                         reg_idxs = crg_reg[k]
-                        raw_idxs = crg_raw.get(k)
-                        if raw_idxs is None or raw_idxs.size == 0:
-                            skipped += 1
-                            continue
-                        missing = reg_idxs[~mask_arr[reg_idxs]]
-                        if missing.size == 0:
+                        raw_idxs = crg_raw[k]
+                        mask_g = mask_arr[reg_idxs]
+                        missing = reg_idxs[~mask_g]
+                        observed = raw_idxs[mask_g]
+                        if missing.size == 0 or observed.size == 0:
                             skipped += 1
                             continue
                         for start in range(0, missing.size, max_q):
                             chunk = missing[start:start + max_q]
                             query_list.append(chunk.astype(np.int64))
-                            context_list.append(raw_idxs.astype(np.int64))
+                            context_list.append(observed.astype(np.int64))
                     n_infer = len(query_list)
                     if n_infer == 0:
                         raise RuntimeError(
-                            "crg: no gather with missing traces; "
+                            "crg: no gather with both missing and observed traces; "
                             f"all {skipped} gathers are fully observed or empty"
                         )
                     n_gathers = len(crg_reg) - skipped

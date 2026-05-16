@@ -800,7 +800,9 @@ class DatasetH5CSGCRG(DatasetH5_all_queryctx):
         sx_qn, sy_qn, rx_qn, ry_qn = self._normalize_coords(sx_q, sy_q, rx_q, ry_q)
         coords_q = np.stack([sx_qn, sy_qn, rx_qn, ry_qn], axis=1).astype(np.float32)
 
-        # ── context: load coords only for diverse_topk, not data yet ──
+        # ── context: load coords from raw H5, normalized by regular-grid stats ──
+        # Context indices point into raw H5 (original observation positions);
+        # normalization uses coord_stats from regular H5 — same as training.
         rx_c_all = self._take_rows(self.h5_data["rx"], context_idx_full).astype(np.float32)
         ry_c_all = self._take_rows(self.h5_data["ry"], context_idx_full).astype(np.float32)
         sx_c_all = self._take_rows(self.h5_data["sx"], context_idx_full).astype(np.float32)
@@ -833,7 +835,7 @@ class DatasetH5CSGCRG(DatasetH5_all_queryctx):
         context_idx = context_idx_full[context_local]
         coords_c = coords_c_all[context_local]
 
-        # ── context data (selected subset only) ──
+        # ── context data (selected subset only, from raw H5) ──
         context_data = self._crop_or_pad_time(
             self._take_rows(self.h5_data["data"], context_idx)
         ).astype(np.float32)
@@ -858,7 +860,7 @@ class DatasetH5CSGCRG(DatasetH5_all_queryctx):
             data_patch, masked_patch, is_query
         )
 
-        # ── patch_info (header fields, reorder to match sort) ──
+        # ── patch_info (header fields: query from regular, context from raw) ──
         sl_q = self._take_rows(self.h5_data_regular["shot_line"], query_idx)
         ss_q = self._take_rows(self.h5_data_regular["shot_stake"], query_idx)
         rl_q = self._take_rows(self.h5_data_regular["recv_line"], query_idx)

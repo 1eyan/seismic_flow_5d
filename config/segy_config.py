@@ -151,7 +151,7 @@ DATASET_KEYS_FIXED = [
 ]
 
 # Default metric weights for 4-axis spatial distance (sampler_utils.py)
-METRIC_WEIGHTS = [1.0, 1.0, 0.5, 0.5]
+METRIC_WEIGHTS = [1.5, 1.0, 0.5, 0.5]
 
 
 def print_info() -> None:
