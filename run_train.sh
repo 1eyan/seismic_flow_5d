@@ -9,14 +9,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
 # ---- GPU ----
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5,6,7}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 NUM_GPUS="${NUM_GPUS:-4}"
 
 # ---- Training ----
 MODEL_NAME="${MODEL_NAME:-trace_axis}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 LR="${LR:-1e-4}"
-EPOCHS="${EPOCHS:-300}"
+EPOCHS="${EPOCHS:-200}"
 SEED="${SEED:-515}"
 DATA_TYPE="${DATA_TYPE:-df_field1031_5d}"
 
@@ -29,18 +29,22 @@ USE_PHYS_OMEGA="${USE_PHYS_OMEGA:-true}"
 H5_DIR="${H5_DIR:-/data/shared/测试数据/h5}"
 H5_FILE="${H5_FILE:-${H5_DIR}/field1031_irregular.h5}"
 H5_FILE_REGULAR="${H5_FILE_REGULAR:-${H5_DIR}/field1031_label.h5}"
-DATASET_NEIGHBORS_TRAIN="${DATASET_NEIGHBORS_TRAIN:-${H5_DIR}/patch_anchor_patch/train_pool_idx_2d.npz}"
+DATASET_NEIGHBORS_TRAIN="${DATASET_NEIGHBORS_TRAIN:-${H5_DIR}/anchor_patch_v2/train_pool_idx_2d.npz}"
 
 # ---- Queryctx ----
 TRAIN_NUM_QUERY="${TRAIN_NUM_QUERY:-32}"
 TRAIN_CONTEXT_SIZE="${TRAIN_CONTEXT_SIZE:-}"
 PATCH_BETA="${PATCH_BETA:-0.3}"
 FORCE_ANCHOR_QUERY="${FORCE_ANCHOR_QUERY:-false}"
-TRACE_SORT_KEYS="${TRACE_SORT_KEYS:-offset,azimuth}"
+#TRACE_SORT_KEYS="${TRACE_SORT_KEYS:-rx}"
 
 TIME_PS="${TIME_PS:-1256}"
 TRACE_PS="${TRACE_PS:-128}"
 USE_P_SCALE="${USE_P_SCALE:-false}"
+
+# ---- SEG-Y config (controls key_columns, trace_sort_keys, coord_col) ----
+SEGY_CONFIG="${SEGY_CONFIG:-field1031}"
+export SEGY_CONFIG
 
 echo "======================================"
 echo "FPM V3 Training — queryctx + trace_axis"
@@ -50,8 +54,9 @@ echo "H5_DIR:     ${H5_DIR}"
 echo "H5 irregular: ${H5_FILE}"
 echo "H5 regular:   ${H5_FILE_REGULAR}"
 echo "neighbors:    ${DATASET_NEIGHBORS_TRAIN}"
-echo "num_query: ${TRAIN_NUM_QUERY}  |  beta: ${PATCH_BETA}  |  sort: ${TRACE_SORT_KEYS}"
+echo "num_query: ${TRAIN_NUM_QUERY}  |  beta: ${PATCH_BETA}"
 echo "phys_omega: ${USE_PHYS_OMEGA}"
+echo "segy_config: ${SEGY_CONFIG}"
 echo "======================================"
 
 cmd_args=(
@@ -73,7 +78,7 @@ cmd_args=(
   --train_num_query "${TRAIN_NUM_QUERY}"
   --patch_beta "${PATCH_BETA}"
   --force_anchor_query "${FORCE_ANCHOR_QUERY}"
-  --trace_sort_keys "${TRACE_SORT_KEYS}"
+  #--trace_sort_keys "${TRACE_SORT_KEYS}"
   --dataset_type queryctx
 )
 

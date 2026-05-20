@@ -40,6 +40,11 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 
 try:
+    from config.segy_config import get_key_columns
+except ImportError:
+    from .config.segy_config import get_key_columns
+
+try:
     from tqdm import tqdm
 except Exception:
 
@@ -71,9 +76,10 @@ def add_prediction(pred_sum, pred_count, key, trace):
         key: trace identity, e.g. (shot_line, shot_stake, recv_line, recv_stake)
         trace: (T,) float32 array
     """
+    # float64 for stable accumulation; asarray already copies (float32->float64)
     trace = np.asarray(trace, dtype=np.float64).reshape(-1)
     if key not in pred_sum:
-        pred_sum[key] = trace.copy()
+        pred_sum[key] = trace
     else:
         pred_sum[key] += trace
     pred_count[key] += 1
@@ -171,6 +177,8 @@ def run_queryctx_inference(
     vis_max: int = 0,
     progress: bool = True,
     logger=None,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> Tuple[Dict, Dict, Dict[str, Any]]:
     """Run inference on a DatasetH5_all_queryctx in inference mode.
 
@@ -205,14 +213,18 @@ def run_queryctx_inference(
     pred_count = defaultdict(int)
     total_missing = 0
     total_traces = 0
+    is_main = rank == 0
 
+    vis_path = None
     if vis_dir is not None:
         vis_path = Path(vis_dir)
         vis_path.mkdir(parents=True, exist_ok=True)
-    else:
-        vis_path = None
+    vis_limit = vis_max if vis_max > 0 else float("inf")
 
     all_indices = list(range(len(dataset)))
+    # DDP: each rank processes only its shard
+    if world_size > 1:
+        all_indices = all_indices[rank::world_size]
     batch_size = max(1, int(batch_size))
 
     if device.type == "cuda":
@@ -220,12 +232,17 @@ def run_queryctx_inference(
     start_time = time.perf_counter()
 
     sample_buf: list = []
+    total_samples = len(all_indices)
+    desc = f"queryctx inference [rank {rank}]" if world_size > 1 else "queryctx inference"
     iterator = tqdm(
         all_indices,
-        desc="queryctx inference",
+        desc=desc,
         unit="sample",
-        disable=not progress,
+        disable=not (progress and is_main),
+        smoothing=0.01,
     )
+
+    
 
     # ------------------------------------------------------------------
     # Batch builder + flusher
@@ -283,7 +300,6 @@ def run_queryctx_inference(
         x_batch, c_batch, scales, valid, meta_list = _build_batch(sample_buf)
         B = x_batch.shape[0]
         _, max_tr, T = x_batch.shape
-        print(max_tr)
         # Update model shape info (required by some FlowMatchingModel impls)
         #if hasattr(fpm.model, "trace_num"):
         fpm.trace_num = max_tr
@@ -291,7 +307,7 @@ def run_queryctx_inference(
         fpm.sample_num = B
 
         pred = flow_sample(fpm, x_batch, c_batch, device)
-        pred = pred * scales[:, None, None].astype(np.float32)
+        pred = pred * scales[:, None, None]
 
         for b in range(B):
             m = meta_list[b]
@@ -306,33 +322,31 @@ def run_queryctx_inference(
             total_missing += missing_count
             total_traces += n_tr
 
-            if visualize and vis_path is not None and (vis_max <= 0 or m["sample_idx"] < vis_max):
-                try:
-                    _visualize_sample(
-                        masked_raw_b,
-                        pred_b,
-                        data_raw_b,
-                        trace_obs,
-                        int(m["sample_idx"]),
-                        vis_path,
-                    )
-                except Exception as e:
-                    if logger is not None:
-                        logger.warning("visualize skipped sample=%d: %s", m["sample_idx"], e)
+            if visualize and is_main and m["sample_idx"] < vis_limit:
+                _visualize_sample(
+                    masked_raw_b,
+                    pred_b,
+                    data_raw_b,
+                    trace_obs,
+                    int(m["sample_idx"]),
+                    vis_path,
+                )
 
             pi = m["patch_info"]
+            # Extract key arrays once per sample (ordered by key_columns)
+            _key_cols = get_key_columns()
+            key_arrays = {col: pi.get(col) for col in _key_cols}
             for j in range(n_tr):
                 if is_query[j]:
-                    key = (
-                        int(pi.get("shot_line", np.zeros(n_tr, dtype=np.int32))[j]),
-                        int(pi.get("shot_stake", np.zeros(n_tr, dtype=np.int32))[j]),
-                        int(pi.get("recv_line", np.zeros(n_tr, dtype=np.int32))[j]),
-                        int(pi.get("recv_stake", np.zeros(n_tr, dtype=np.int32))[j]),
+                    key = tuple(
+                        int(key_arrays[col][j]) if key_arrays[col] is not None else 0
+                        for col in _key_cols
                     )
-                    add_prediction(pred_sum, pred_count, key, fit_trace(pred_b[j], T))
+                    add_prediction(pred_sum, pred_count, key, pred_b[j])
 
         sample_buf.clear()
 
+    
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
@@ -342,12 +356,10 @@ def run_queryctx_inference(
         sample_buf.append((sample, idx))
         if len(sample_buf) >= batch_size:
             _flush()
-        if progress:
+        if progress and is_main:
             n_tr = sample["data"].shape[0]
             is_query = np.asarray(sample["is_query"], dtype=bool)
-            iterator.set_postfix(
-                sample=idx, traces=n_tr, missing=int(is_query.sum())
-            )
+            iterator.set_postfix(sample=idx, traces=n_tr, missing=int(is_query.sum()))
 
     _flush()  # remaining
 
@@ -355,25 +367,18 @@ def run_queryctx_inference(
         torch.cuda.synchronize()
     seconds = time.perf_counter() - start_time
 
-    metadata = {
+    if logger is not None:
+        logger.info(
+            "queryctx inference done: %.2fs | samples=%d traces=%d missing=%d keys=%d",
+            seconds, total_samples, total_traces, total_missing, len(pred_sum),
+        )
+
+    return pred_sum, pred_count, seconds, {
         "dataset_samples": int(len(dataset)),
         "dataset_traces": int(total_traces),
         "dataset_missing": int(total_missing),
         "prediction_keys": int(len(pred_sum)),
-        "inference_seconds": round(seconds, 3),
     }
-
-    if logger is not None:
-        logger.info(
-            "queryctx inference done: %.2fs | samples=%d traces=%d missing=%d keys=%d",
-            seconds,
-            metadata["dataset_samples"],
-            metadata["dataset_traces"],
-            metadata["dataset_missing"],
-            metadata["prediction_keys"],
-        )
-
-    return pred_sum, pred_count, metadata
 
 
 # ---------------------------------------------------------------------------

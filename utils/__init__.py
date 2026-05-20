@@ -17,9 +17,9 @@ from .sampler_utils import (
 )
 
 from .segy_utils import (
-    SEGY_BYTE_POS,
     build_lookup,
     read_segy_data,
     read_segy_headers,
+    sort_output_segy,
     write_segy_data,
 )

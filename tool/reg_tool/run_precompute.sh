@@ -13,12 +13,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY_SCRIPT="${SCRIPT_DIR}/precompute_anchor_patch_v2.py"
 
-# ── 路径默认值 ────────────────────────────────────────────────
-BASE_DIR="${BASE_DIR:-/home/chengzhitong/5d_regular/seis_flow_data12V2/h5/dongfang}"
-RAW_H5="${RAW_H5:-${BASE_DIR}/raw5d_data1104.h5}"
-REGULAR_H5="${REGULAR_H5:-${BASE_DIR}/reg5dbin_label1031.h5}"
+BASE_DIR="${BASE_DIR:-/data/shared/测试数据/h5}"
+RAW_H5="${RAW_H5:-${BASE_DIR}/field1031_irregular.h5}"
+REGULAR_H5="${REGULAR_H5:-${BASE_DIR}/field1031_label.h5}"
+TARGET_H5="${TARGET_H5:-${BASE_DIR}/field1031_mask.h5}"
 GROUP_KEY="${GROUP_KEY:-1551}"
-PATCH_DIR="${PATCH_DIR:-${BASE_DIR}/patchV4}"
+GROUP_KEY="${GROUP_KEY:-1551}"
+PATCH_DIR="${PATCH_DIR:-${BASE_DIR}/anchor_patch_v2}"
 
 # ── 训练参数 ──────────────────────────────────────────────────
 NUM_ANCHORS="${NUM_ANCHORS:-7896}"
@@ -37,7 +38,7 @@ BLOCK_DIVISORS="${BLOCK_DIVISORS:-6,21,7,5}"
 STRIDE_DIVISORS="${STRIDE_DIVISORS:-6,21,7,5}"
 QUERY_MASK_MODE="${QUERY_MASK_MODE:-regular_true}"
 MAX_QUERY_PER_PATCH="${MAX_QUERY_PER_PATCH:-128}"
-INFER_GPU_DEVICE="${INFER_GPU_DEVICE:-cuda:0}"
+INFER_GPU_DEVICE="${INFER_GPU_DEVICE:-cuda:5}"
 GPU_QUERY_CHUNK_SIZE="${GPU_QUERY_CHUNK_SIZE:-128}"
 
 # ── 拆分逗号分隔的多值参数 ────────────────────────────────────
@@ -48,6 +49,7 @@ IFS=',' read -ra _stride_divs <<< "${STRIDE_DIVISORS}"
 ARGS=(
     --base-dir              "${BASE_DIR}"
     --raw-h5                "${RAW_H5}"
+    --target-h5             "${TARGET_H5}"
     --regular-h5            "${REGULAR_H5}"
     --group-key             "${GROUP_KEY}"
     --patch-dir             "${PATCH_DIR}"
@@ -66,7 +68,7 @@ ARGS=(
     --gpu-query-chunk-size  "${GPU_QUERY_CHUNK_SIZE}"
     --infer-gpu-device      "${INFER_GPU_DEVICE}"
     --no-infer-use-gpu
-    --skip-train
+    --skip-infer
 )
 
 [[ -n "${NUM_ANCHORS}" ]] && ARGS+=(--num-anchors "${NUM_ANCHORS}")

@@ -98,7 +98,7 @@ _g.add_argument(
 _g.add_argument(
     "--epoch_repeat",
     type=int,
-    default=6,
+    default=4,
     help="Repeat each anchor this many times per epoch (with different random seeds for diversity)",
 )
 _g.add_argument(

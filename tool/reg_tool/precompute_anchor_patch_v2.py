@@ -135,6 +135,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--base-dir", type=str, default=str(default_base_dir()))
     parser.add_argument("--raw-h5", type=str, default=None)
+    parser.add_argument("--target-h5", type=str, default=None)
     parser.add_argument("--regular-h5", type=str, default=None)
     parser.add_argument("--group-key", type=str, default="1551")
     parser.add_argument("--patch-dir", type=str, default=None)
@@ -217,6 +218,7 @@ def main() -> None:
     base_dir = as_path(args.base_dir, default_base_dir())
     raw_h5 = as_path(args.raw_h5, base_dir / "raw5d_data1104.h5")
     regular_h5 = as_path(args.regular_h5, base_dir / "reg5dbin_label1031.h5")
+    target_h5 = args.target_h5
     patch_dir = as_path(args.patch_dir, base_dir / "patchV2")
     patch_dir.mkdir(parents=True, exist_ok=True)
 
@@ -235,8 +237,10 @@ def main() -> None:
         coord_obs = read_coord4(raw_group)
         coord_grid = read_coord4(regular_group)
         regular_mask = read_regular_mask(
-            regular_group, args.regular_mask_key, coord_grid.shape[0]
-        )
+                regular_group, args.regular_mask_key, coord_grid.shape[0],
+                target_h5, group_key=args.group_key,
+            )
+        print("regular mask true count:", int(regular_mask.sum()))
 
         raw_keys = generate_binning_keys(raw_group).astype(np.int64)
         reg_keys = generate_binning_keys(regular_group).astype(np.int64)

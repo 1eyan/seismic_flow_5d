@@ -15,18 +15,15 @@ import dataset_config
 import struct
 import pandas as pd
 
-from config.segy_config import get_byte_pos, SORT_KEYS
+from config.segy_config import get_byte_pos, get_sort_keys
 
 
 def get_traces_idx(cfg):
     return np.load(os.path.join(os.path.dirname(info_h5), f"{info_h5.split('/')[-1].split('.')[0]}_info", f"kept_trace_indices_{cfg['domain']}_{cfg['keep_ratio']}.npy"))
 
-# ---- Byte positions loaded from segy_config ----
-# To switch datasets, call segy_config.load_config("preset_name") before importing this module,
-#   or set env: SEGY_CONFIG=preset_name python ...
-BYTE_POS = get_byte_pos()
-# Coordinate-only subset (used by self_computed / segc3 mode)
-BYTE_POS_ = {k: v for k, v in BYTE_POS.items() if k in ("shot_x", "shot_y", "rec_x", "rec_y")}
+# ---- Byte positions are loaded dynamically from segy_config ----
+# To switch datasets, call segy_config.load_config("preset_name") before calling
+#   read functions, or set env: SEGY_CONFIG=preset_name python ...
 # === 辅助函数 ===
 def _read_bin_header_format_and_ns(f):
     f.seek(3200, 0)
@@ -56,8 +53,9 @@ def _scale_coords(values, scalars):
 # === sgy-->headers-->pandas dataframe ===
 ## 道头文件中如果自带炮线炮桩测线检波点
 def read_headers_pure_python_fixed(path: Path):
+    byte_pos = get_byte_pos()
     out = {'trace': []}
-    for key in BYTE_POS.keys():
+    for key in byte_pos.keys():
         out[key] = []
     with open(path, 'rb') as f:
         fmt, _ = _read_bin_header_format_and_ns(f)
@@ -72,33 +70,35 @@ def read_headers_pure_python_fixed(path: Path):
                 j0 = pos1b - 1
                 return struct.unpack('>i', hdr[j0:j0+4])[0]
             out['trace'].append(t)
-            out['shot_line'].append(i32be(BYTE_POS['shot_line']))
-            out['shot_no'].append(i32be(BYTE_POS['shot_no']))
-            out['recv_line'].append(i32be(BYTE_POS['recv_line']))
-            out['recv_no'].append(i32be(BYTE_POS['recv_no']))
+            out['shot_line'].append(i32be(byte_pos['shot_line']))
+            out['shot_no'].append(i32be(byte_pos['shot_no']))
+            out['recv_line'].append(i32be(byte_pos['recv_line']))
+            out['recv_no'].append(i32be(byte_pos['recv_no']))
             # 读取坐标信息
-            out['shot_x'].append(i32be(BYTE_POS['shot_x']))
-            out['shot_y'].append(i32be(BYTE_POS['shot_y']))
-            out['rec_x'].append(i32be(BYTE_POS['rec_x']))
-            out['rec_y'].append(i32be(BYTE_POS['rec_y']))
-            out['shot_stake'].append(i32be(BYTE_POS['shot_stake']))
-            out['recv_stake'].append(i32be(BYTE_POS['recv_stake']))
-            out['cmp'].append(i32be(BYTE_POS['cmp']))
-            out['cmp_line'].append(i32be(BYTE_POS['cmp_line']))
-            out['offset'].append(i32be(BYTE_POS['offset']))
+            out['shot_x'].append(i32be(byte_pos['shot_x']))
+            out['shot_y'].append(i32be(byte_pos['shot_y']))
+            out['rec_x'].append(i32be(byte_pos['rec_x']))
+            out['rec_y'].append(i32be(byte_pos['rec_y']))
+            out['shot_stake'].append(i32be(byte_pos['shot_stake']))
+            out['recv_stake'].append(i32be(byte_pos['recv_stake']))
+            out['cmp'].append(i32be(byte_pos['cmp']))
+            out['cmp_line'].append(i32be(byte_pos['cmp_line']))
+            out['offset'].append(i32be(byte_pos['offset']))
             ns = struct.unpack('>H', hdr[114:116])[0]
             f.seek(ns * bps, 1)
             t += 1
     return pd.DataFrame(out)
 
 def read_headers_pure_self_computed(path: Path):
+    bp = get_byte_pos()
+    byte_pos_self = {k: v for k, v in bp.items() if k in ("shot_x", "shot_y", "rec_x", "rec_y")}
     out = {'trace': [],
     'shot_x': [],
     'shot_y': [],
     'rec_x': [],
     'rec_y': [],
     }
-    for key in BYTE_POS_.keys():
+    for key in byte_pos_self.keys():
         out[key] = []
     with open(path, 'rb') as f:
         fmt, _ = _read_bin_header_format_and_ns(f)
@@ -113,17 +113,19 @@ def read_headers_pure_self_computed(path: Path):
                 j0 = pos1b - 1
                 return struct.unpack('>i', hdr[j0:j0+4])[0]
             out['trace'].append(t)
-            out['shot_x'].append(i32be(BYTE_POS_['shot_x']))
-            out['shot_y'].append(i32be(BYTE_POS_['shot_y']))
-            out['rec_x'].append(i32be(BYTE_POS_['rec_x']))
-            out['rec_y'].append(i32be(BYTE_POS_['rec_y']))
+            out['shot_x'].append(i32be(byte_pos_self['shot_x']))
+            out['shot_y'].append(i32be(byte_pos_self['shot_y']))
+            out['rec_x'].append(i32be(byte_pos_self['rec_x']))
+            out['rec_y'].append(i32be(byte_pos_self['rec_y']))
             ns = struct.unpack('>H', hdr[114:116])[0]
             f.seek(ns * bps, 1)
             t += 1
     #print(len(out['trace']),len(out['shot_x']),len(out['shot_y']),len(out['rec_x']),len(out['rec_y']))
     return pd.DataFrame(out)
 
-def organize_traces(input_segy, headers_df=None, sort_keys=SORT_KEYS,mode='self_computed'):
+def organize_traces(input_segy, headers_df=None, sort_keys=None, mode='self_computed'):
+    if sort_keys is None:
+        sort_keys = get_sort_keys()
     """
     按 headers dataframe 的排序键重排地震道。
     - headers_df 为 None: 自动从 SEG-Y 读取道头并按 sort_keys 排序
@@ -345,7 +347,7 @@ def add_ovt_to_h5(h5_file, group_name='1551',
     print(f"[add_ovt_to_h5] OVT fields written to {h5_file}/{group_name}")
 
 
-def segy2h5(h5_file, input_segy, group_name='1551', headers_df=None, sort_keys=SORT_KEYS,mode='self_computed',
+def segy2h5(h5_file, input_segy, group_name='1551', headers_df=None, sort_keys=None, mode='self_computed',
             compute_ovt=False, mx_bin=None, my_bin=None, hx_bin=None, hy_bin=None):
     """
     单个 SEG-Y 落盘到 H5，按 sort_keys 组织地震道。
@@ -487,7 +489,7 @@ def convert_segy_triple(
         Keys: 'irregular', 'mask', 'label'.
     """
     if sort_keys is None:
-        sort_keys = SORT_KEYS
+        sort_keys = get_sort_keys()
 
     root = find_common_root(irr_segy, mask_segy, label_segy)
     h5_dir = os.path.join(root, 'h5')
@@ -555,12 +557,10 @@ if __name__ == "__main__":
 
     cli_args = ap.parse_args()
 
-    # Allow overriding config at runtime
+    # Allow overriding config at runtime (functions call get_byte_pos() dynamically)
     if cli_args.config:
         import config.segy_config as scfg
         scfg.load_config(cli_args.config)
-        BYTE_POS = get_byte_pos()
-        BYTE_POS_ = {k: v for k, v in BYTE_POS.items() if k in ("shot_x", "shot_y", "rec_x", "rec_y")}
 
     # Triple-file mode
     if cli_args.irr and cli_args.mask and cli_args.label:

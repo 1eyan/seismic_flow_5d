@@ -40,6 +40,7 @@ from tqdm import tqdm
 
 from dataset import DatasetH5_all_queryctx
 from config.data_config import get_parser
+from config.segy_config import print_info as print_segy_config
 from utils import build_coord_config
 from model import SeisDiTRopeV2
 from fpm import FlowMatchingModel
@@ -400,6 +401,10 @@ def main():
     rank = accelerator.process_index
     world_size = accelerator.num_processes
 
+    # Print active SEG-Y dataset config (rank 0 only)
+    if rank == 0:
+        print_segy_config()
+
     # Seed
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -422,7 +427,7 @@ def main():
             train_context_size=args.train_context_size,
             patch_beta=args.patch_beta,
             force_anchor_query=args.force_anchor_query,
-            trace_sort_keys=trace_sort_keys,
+            #trace_sort_keys=trace_sort_keys,
             use_p_scale=args.use_p_scale,
             time_ps=args.time_ps,
             trace_ps=args.trace_ps,

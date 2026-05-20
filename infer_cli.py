@@ -36,17 +36,20 @@ from utils import build_coord_config
 from model import SeisDiTRopeV2
 from fpm import FlowMatchingModel
 from infer import run_queryctx_inference, add_prediction, fit_trace
+from config.segy_config import (
+    get_byte_pos,
+    get_key_columns,
+    get_sort_keys,
+    load_config as load_segy_config,
+    print_info as print_segy_config,
+)
 from utils import (
     read_segy_headers,
     read_segy_data,
     write_segy_data,
     build_lookup,
+    sort_output_segy,
 )
-
-try:
-    from .config.segy_config import KEY_COLUMNS
-except ImportError:
-    from config.segy_config import KEY_COLUMNS
 
 try:
     from tqdm import tqdm
@@ -159,12 +162,12 @@ def save_reports(output_dir: Path, headers, written, unfilled, still_missing,
     ):
         with open(output_dir / name, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["trace_idx", *KEY_COLUMNS])
+            writer.writerow(["trace_idx", *get_key_columns()])
             for idx in indices:
                 writer.writerow([idx, *header_by_idx.get(int(idx), ("", "", "", ""))])
     with open(output_dir / "unmatched_prediction_keys.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(KEY_COLUMNS)
+        writer.writerow(get_key_columns())
         writer.writerows(unmatched)
 
 
@@ -198,12 +201,12 @@ def fill_segy(args, headers, missing_global, pred_sum, pred_count, logger,
     written_sorted = sorted(written)
     missing_indices = set(np.flatnonzero(missing_global).tolist())
     unfilled = sorted(missing_indices - written)
-    after = read_segy_data(args.output_segy)
+    # In-memory validation (avoids disk readback)
     still_missing = np.flatnonzero(
-        missing_global & np.all(np.abs(after) <= args.missing_eps, axis=1)
+        missing_global & np.all(np.abs(out) <= args.missing_eps, axis=1)
     ).tolist()
     observed_changed = np.flatnonzero(
-        (~missing_global) & np.any(np.abs(after - mask_data) > args.missing_eps, axis=1)
+        (~missing_global) & np.any(np.abs(out - mask_data) > args.missing_eps, axis=1)
     ).tolist()
 
     residual_stats = {}
@@ -224,7 +227,7 @@ def fill_segy(args, headers, missing_global, pred_sum, pred_count, logger,
                      residual_stats["residual_mean_abs"])
 
     summary = {
-        "key_columns": list(KEY_COLUMNS),
+        "key_columns": list(get_key_columns()),
         "segy_traces": int(mask_data.shape[0]),
         "segy_samples": int(mask_data.shape[1]),
         "missing_total": int(len(missing_indices)),
@@ -303,6 +306,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sde_sampling_method", default="Euler")
     parser.add_argument("--sde_num_steps", type=int, default=250)
 
+    parser.add_argument("--segy_config", type=str, default=None,
+                        help="SEG-Y preset name (field1031, sw06, segc3). "
+                             "Overrides SEGY_CONFIG env var. Default: field1031")
+    parser.add_argument("--sort_segy", type=str2bool, default=False,
+                        help="Sort output SEG-Y by recv_line, recv_stake, shot_line, shot_stake")
     parser.add_argument("--visualize", type=str2bool, default=False)
     parser.add_argument("--vis_batches", type=int, default=0)
 
@@ -327,28 +335,46 @@ def main() -> None:
         device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith("cuda") else "cpu")
         logger = setup_logger(Path(args.output_dir))
 
+    # Load SEG-Y config preset (must happen before any config logging / SEGY reading)
+    if args.segy_config is not None:
+        load_segy_config(args.segy_config)
+
     if is_main:
         logger.info("args: %s", vars(args))
-        logger.info("key_columns=%s world_size=%d", KEY_COLUMNS, world_size)
+        logger.info("world_size=%d", world_size)
+        print_segy_config()
+
+    # Cleanup stale .rank_results from previous crashed run (all ranks)
+    _stale_dir = Path(args.output_dir) / ".rank_results"
+    if _stale_dir.exists():
+        import shutil as _shutil
+        if is_main:
+            logger.info("cleaning up stale rank results: %s", _stale_dir)
+        _shutil.rmtree(_stale_dir, ignore_errors=True)
 
     total_start = time.perf_counter()
 
-    # Read SEGY
-    mask_data = read_segy_data(args.mask_path)
-    headers = read_segy_headers(args.mask_path, args.header_mode)
-    if len(headers) != mask_data.shape[0]:
-        raise ValueError(f"header_count={len(headers)} != segy_traces={mask_data.shape[0]}")
-    missing_global = np.all(np.abs(mask_data) <= args.missing_eps, axis=1)
+    # Read SEGY (only rank 0 needs it for fill_segy)
     if is_main:
+        mask_data = read_segy_data(args.mask_path)
+        headers = read_segy_headers(args.mask_path, args.header_mode)
+        if len(headers) != mask_data.shape[0]:
+            raise ValueError(f"header_count={len(headers)} != segy_traces={mask_data.shape[0]}")
+        missing_global = np.all(np.abs(mask_data) <= args.missing_eps, axis=1)
         logger.info("template SEGY: traces=%d samples=%d missing=%d",
                      mask_data.shape[0], mask_data.shape[1], int(missing_global.sum()))
 
-    label_data = None
-    if args.label_segy:
-        label_data = read_segy_data(args.label_segy)
-        if label_data.shape != mask_data.shape:
-            raise ValueError(f"label shape {label_data.shape} != mask shape {mask_data.shape}")
-        logger.info("label SEGY loaded: %s shape=%s", args.label_segy, label_data.shape)
+        label_data = None
+        if args.label_segy:
+            label_data = read_segy_data(args.label_segy)
+            if label_data.shape != mask_data.shape:
+                raise ValueError(f"label shape {label_data.shape} != mask shape {mask_data.shape}")
+            logger.info("label SEGY loaded: %s shape=%s", args.label_segy, label_data.shape)
+    else:
+        mask_data = None
+        headers = None
+        missing_global = None
+        label_data = None
 
     # Load training config from checkpoint for auto-detection
     train_cfg = load_training_config(args.checkpoint)
@@ -433,7 +459,7 @@ def main() -> None:
     ).eval()
 
     # ---- Inference ----
-    pred_sum, pred_count, infer_stats = run_queryctx_inference(
+    pred_sum, pred_count, inference_seconds, infer_stats = run_queryctx_inference(
         dataset=dataset,
         fpm=fpm,
         device=device,
@@ -441,31 +467,102 @@ def main() -> None:
         visualize=args.visualize,
         vis_dir=str(Path(args.output_dir) / "vis"),
         vis_max=args.vis_batches,
-        progress=True,
+        progress=is_main,
         logger=logger,
+        rank=rank,
+        world_size=world_size,
     )
 
-    # ---- DDP gather ----
+    # ---- DDP gather via file-based merge (avoids NCCL timeout) ----
     if world_size > 1:
-        dist.barrier()
-        gathered = [None] * world_size
-        dist.all_gather_object(gathered, (pred_sum, dict(pred_count), infer_stats))
+        import pickle as _pickle
+        import time as _time
+        import shutil as _shutil
+
+        _rank_base = Path(args.output_dir) / ".rank_results"
+        _rank_dir = _rank_base / f"rank_{rank}"
+        _rank_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save pred_sum: store arrays in npz (keyed by index) + tuple keys via pickle
+        _r_keys = list(pred_sum.keys())
+        with open(_rank_dir / "pred_keys.pkl", "wb") as _f:
+            _pickle.dump(_r_keys, _f, protocol=_pickle.HIGHEST_PROTOCOL)
+        _npz_dict = {f"arr_{i}": pred_sum[k] for i, k in enumerate(_r_keys)}
+        np.savez_compressed(_rank_dir / "pred_sum.npz", **_npz_dict)
+        # Save pred_count with stringified keys (JSON-compatible)
+        _r_count = {"__".join(map(str, k)): int(v) for k, v in pred_count.items()}
+        with open(_rank_dir / "pred_count.json", "w") as _f:
+            json.dump(_r_count, _f)
+
+        # File-based barrier: each rank signals completion by touching a done file
+        (_rank_base / f".rank_{rank}_done").touch()
+
         if is_main:
+            _max_wait = 86400  # 24h timeout for file barrier
+            logger.info("waiting for all ranks to finish inference (file barrier, timeout=%dh)...",
+                        _max_wait // 3600)
+            _waited = 0
+            _pending = set(range(world_size))
+            while _pending:
+                _time.sleep(2)
+                _waited += 2
+                _pending = {r for r in _pending
+                            if not (_rank_base / f".rank_{r}_done").exists()}
+                if _waited % 60 == 0:
+                    logger.info("still waiting for ranks %s (%.0f s elapsed)...",
+                                sorted(_pending), _waited)
+                if _waited > _max_wait:
+                    raise RuntimeError(
+                        f"File barrier timed out after {_max_wait}s. "
+                        f"Missing ranks: {sorted(_pending)}. "
+                        f"The missing ranks may have crashed (OOM, segfault). "
+                        f"Check the logs for errors on ranks {sorted(_pending)}."
+                    )
+            logger.info("all ranks done, merging %d result files...", world_size)
+
             merged_sum, merged_count = {}, defaultdict(int)
-            for ps, pc, _st in gathered:
-                for k, v in ps.items():
-                    merged_sum[k] = v if k not in merged_sum else merged_sum[k] + v
-                for k, v in pc.items():
-                    merged_count[k] += v
+            for r in range(world_size):
+                _rd = _rank_base / f"rank_{r}"
+                # Load pred_sum arrays + keys
+                with open(_rd / "pred_keys.pkl", "rb") as _f:
+                    _r_keys = _pickle.load(_f)
+                with np.load(_rd / "pred_sum.npz") as _rd_npz:
+                    for i, k in enumerate(_r_keys):
+                        arr = _rd_npz[f"arr_{i}"]
+                        if k in merged_sum:
+                            merged_sum[k] += arr
+                        else:
+                            merged_sum[k] = arr.copy()
+                # Load pred_count
+                with open(_rd / "pred_count.json") as _f:
+                    _r_counts = json.load(_f)
+                for k_str, v in _r_counts.items():
+                    kt = tuple(int(x) for x in k_str.split("__"))
+                    merged_count[kt] += v
+
             pred_sum, pred_count = merged_sum, merged_count
+            # Cleanup temp files
+            _shutil.rmtree(_rank_base)
+            logger.info("merge complete: %d unique keys", len(pred_sum))
 
     # ---- SEGY fill ----
     if is_main:
         summary = fill_segy(args, headers, missing_global, pred_sum, pred_count,
                             logger, label_data=label_data, time_ps=time_ps)
+        # Merge infer_stats, but keep the global prediction_keys from fill_segy
+        _global_keys = len(pred_sum)
         summary.update(infer_stats)
+        summary["prediction_keys"] = int(_global_keys)
         summary["num_gpus"] = world_size
         summary["total_seconds"] = round(time.perf_counter() - total_start, 3)
+
+        # ---- SEGY sort ----
+        if args.sort_segy:
+            sorted_path = args.output_segy.replace(".sgy", "_sorted.sgy")
+            logger.info("sorting output SEG-Y: %s", sorted_path)
+            sort_output_segy(args.output_segy, sorted_path)
+            summary["output_segy_sorted"] = sorted_path
+
         (Path(args.output_dir) / "summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
         )

@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY_SCRIPT="${SCRIPT_DIR}/core.py"
 
 # ── 从命令行取 mode ──────────────────────────────────────────
-MODE="${MODE:-crg}"
+MODE="${MODE:-anchor_patch}"
 if [[ $# -gt 0 && "$1" != -* ]]; then
     MODE="$1"
     shift
@@ -49,7 +49,7 @@ POOL_SIZE="${POOL_SIZE:-}"
 BLOCK_DIVISORS="${BLOCK_DIVISORS:-6,21,7,5}"
 STRIDE_DIVISORS="${STRIDE_DIVISORS:-6,21,7,5}"
 QUERY_MASK_MODE="${QUERY_MASK_MODE:-regular_true}"
-MAX_QUERY_PER_PATCH="${MAX_QUERY_PER_PATCH:-64}"
+MAX_QUERY_PER_PATCH="${MAX_QUERY_PER_PATCH:-128}"
 GPU_QUERY_CHUNK_SIZE="${GPU_QUERY_CHUNK_SIZE:-128}"
 
 # ── GPU 参数 ──────────────────────────────────────────────────
@@ -72,8 +72,8 @@ ENABLE_AUTO_PARAMS="${ENABLE_AUTO_PARAMS:-fasle}"
 AUTO_PARAMS_ANCHOR_STRIDE="${AUTO_PARAMS_ANCHOR_STRIDE:-128}"
 RAW_KEY_AGGREGATE="${RAW_KEY_AGGREGATE:-mean}"
 GREEDY_FILL_UNCOVERED="${GREEDY_FILL_UNCOVERED:-true}"
-SKIP_TRAIN="${SKIP_TRAIN:-true}"
-SKIP_INFER="${SKIP_INFER:-false}"
+SKIP_TRAIN="${SKIP_TRAIN:-false}"
+SKIP_INFER="${SKIP_INFER:-true}"
 
 # ── 构建 ARGS ─────────────────────────────────────────────────
 ARGS=(

@@ -18,7 +18,7 @@ import numpy as np
 from h5py import File
 
 from utils.sampler_utils import diverse_topk
-from config.segy_config import COORD_COL as _COORD_COL, TRACE_SORT_KEYS
+from config.segy_config import get_coord_col, get_trace_sort_keys
 
     
 
@@ -59,7 +59,7 @@ class DatasetH5Interp:
         Number of time samples per trace.
     """
 
-    _COORD_COL = _COORD_COL
+    _COORD_COL = get_coord_col()  # from segy_config (active preset)
 
     def __init__(
         self,
@@ -71,7 +71,7 @@ class DatasetH5Interp:
         patch_beta: float = 0.3,
         patch_metric_weights=None,
         force_anchor_query: bool = False,
-        trace_sort_keys: Tuple[str, ...] = TRACE_SORT_KEYS,
+        trace_sort_keys: Optional[Tuple[str, ...]] = None,
         time_ps: int = 1256,
         trace_ps: int = 128,
     ):
@@ -91,6 +91,8 @@ class DatasetH5Interp:
         self.patch_beta = float(patch_beta)
         self.patch_metric_weights = patch_metric_weights
         self.force_anchor_query = bool(force_anchor_query)
+        if trace_sort_keys is None:
+            trace_sort_keys = get_trace_sort_keys()
         self.trace_sort_keys = tuple(trace_sort_keys)
 
         self.dt_ms = 4

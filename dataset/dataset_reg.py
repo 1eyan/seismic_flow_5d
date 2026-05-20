@@ -16,7 +16,22 @@ import numpy as np
 from h5py import File
 from utils.sampler_utils import diverse_topk
 from config.data_config import object_args as _default_args
-from config.segy_config import COORD_COL as _COORD_COL, TRACE_SORT_KEYS
+from config.segy_config import get_coord_col, get_key_columns, get_trace_sort_keys
+
+
+def _is_main_worker():
+    """Return True if this is NOT a DataLoader worker subprocess."""
+    try:
+        from torch.utils.data import get_worker_info
+        return get_worker_info() is None
+    except ImportError:
+        return True
+
+
+def _safe_print(*args, **kwargs):
+    """Print only in the main process, suppressing worker spam."""
+    if _is_main_worker():
+        print(*args, **kwargs)
 
 
 
@@ -45,7 +60,7 @@ class DatasetH5_all_queryctx:
         patch_mode: "train_pool" or "infer_query_context"
     """
 
-    _COORD_COL = _COORD_COL  # from segy_config
+    _COORD_COL = get_coord_col()  # from segy_config (active preset)
 
     def __init__(
         self,
@@ -59,7 +74,7 @@ class DatasetH5_all_queryctx:
         patch_beta: float = 0.3,
         patch_metric_weights=None,
         force_anchor_query: bool = False,
-        trace_sort_keys: Tuple[str, ...] = TRACE_SORT_KEYS,
+        trace_sort_keys: Optional[Tuple[str, ...]] = None,
         use_p_scale: bool = False,
         time_ps: int = 1256,
         trace_ps: int = 128,
@@ -84,6 +99,8 @@ class DatasetH5_all_queryctx:
         self.epoch_repeat = int(max(1, epoch_repeat))
         self.num_anchors = None  # set after metadata load for train_pool mode
 
+        if trace_sort_keys is None:
+            trace_sort_keys = get_trace_sort_keys()
         self.trace_sort_keys = tuple(trace_sort_keys)
         self.use_p_scale = use_p_scale
 
@@ -95,26 +112,26 @@ class DatasetH5_all_queryctx:
         self.h5_data_regular = self._load_h5_group(self.h5File_regular)
         self.h5_data_tgt = {}
 
-        print(self.h5_data_regular["data"].shape)
-        print(self.h5_data["data"].shape)
-        print("loading data")
+        _safe_print(self.h5_data_regular["data"].shape)
+        _safe_print(self.h5_data["data"].shape)
+        _safe_print("loading data")
 
         self.coord_stats = self.compute_coord_stats()
-        print("coord_stats computed")
+        _safe_print("coord_stats computed")
         self.patch_meta = self._load_patch_metadata(dataset_neighbors)
         self.patch_mode = self.patch_meta["mode"]
-        print(self.patch_mode)
+        _safe_print(self.patch_mode)
         base_samples = int(self.patch_meta["num_samples"])
         if self.train and self.patch_mode == "train_pool" and self.epoch_repeat > 1:
             self.num_anchors = base_samples
             self.num_samples = base_samples * self.epoch_repeat
-            print(f"patch metadata mode: {self.patch_mode}, anchors={self.num_anchors}, "
-                  f"samples={self.num_samples} (epoch_repeat={self.epoch_repeat})")
+            _safe_print(f"patch metadata mode: {self.patch_mode}, anchors={self.num_anchors}, "
+                        f"samples={self.num_samples} (epoch_repeat={self.epoch_repeat})")
         else:
             self.num_samples = base_samples
             if self.patch_mode == "train_pool":
                 self.num_anchors = base_samples
-            print(f"patch metadata mode: {self.patch_mode}, samples: {self.num_samples}")
+            _safe_print(f"patch metadata mode: {self.patch_mode}, samples: {self.num_samples}")
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -305,15 +322,25 @@ class DatasetH5_all_queryctx:
         sy_all = self.h5_data_regular["sy"]
         rx_all = self.h5_data_regular["rx"]
         ry_all = self.h5_data_regular["ry"]
-        dsx, sx_u = self.typical_grid_step(sx_all)
-        dsy, sy_u = self.typical_grid_step(sy_all)
-        drx, rx_u = self.typical_grid_step(rx_all)
-        dry, ry_u = self.typical_grid_step(ry_all)
 
-        sx_min, sx_max = float(sx_u.min()), float(sx_u.max())
-        sy_min, sy_max = float(sy_u.min()), float(sy_u.max())
-        rx_min, rx_max = float(rx_u.min()), float(rx_u.max())
-        ry_min, ry_max = float(ry_u.min()), float(ry_u.max())
+        # Robust min/max via percentile clipping (0.5% / 99.5%)
+        # Protects normalization range from extreme coordinate outliers
+        # while keeping grid-step detection on raw data.
+        _lo, _hi = 0.5, 99.5
+        sx_min = float(np.percentile(sx_all, _lo))
+        sx_max = float(np.percentile(sx_all, _hi))
+        sy_min = float(np.percentile(sy_all, _lo))
+        sy_max = float(np.percentile(sy_all, _hi))
+        rx_min = float(np.percentile(rx_all, _lo))
+        rx_max = float(np.percentile(rx_all, _hi))
+        ry_min = float(np.percentile(ry_all, _lo))
+        ry_max = float(np.percentile(ry_all, _hi))
+
+        # Grid-step from raw unique values (unaffected by clipping)
+        dsx, _ = self.typical_grid_step(sx_all)
+        dsy, _ = self.typical_grid_step(sy_all)
+        drx, _ = self.typical_grid_step(rx_all)
+        dry, _ = self.typical_grid_step(ry_all)
 
         deltas = {}
         if dsx is not None and (sx_max - sx_min) > 0:
@@ -327,14 +354,14 @@ class DatasetH5_all_queryctx:
         self.scale = deltas
 
         stats = {
-            "sx_min": sx_all.min(),
-            "sx_max": sx_all.max(),
-            "sy_min": sy_all.min(),
-            "sy_max": sy_all.max(),
-            "rx_min": rx_all.min(),
-            "rx_max": rx_all.max(),
-            "ry_min": ry_all.min(),
-            "ry_max": ry_all.max(),
+            "sx_min": sx_min,
+            "sx_max": sx_max,
+            "sy_min": sy_min,
+            "sy_max": sy_max,
+            "rx_min": rx_min,
+            "rx_max": rx_max,
+            "ry_min": ry_min,
+            "ry_max": ry_max,
             "grid_step_sx": dsx,
             "grid_step_sy": dsy,
             "grid_step_rx": drx,
@@ -347,7 +374,7 @@ class DatasetH5_all_queryctx:
                 if s is not None:
                     stats[f"{name}_min"] *= s
                     stats[f"{name}_max"] *= s
-            print(f"[DatasetH5_all_queryctx] p_scale applied to coord_stats: {self.scale}")
+            _safe_print(f"[DatasetH5_all_queryctx] p_scale applied to coord_stats: {self.scale}")
 
         stats["Lx"] = 0.5 * max(
             stats["sx_max"] - stats["sx_min"], stats["rx_max"] - stats["rx_min"]
@@ -514,20 +541,11 @@ class DatasetH5_all_queryctx:
             data_patch, masked_patch, is_query
         )
 
-        sl_q = self._take_rows(self.h5_data_regular["shot_line"], query_idx)
-        ss_q = self._take_rows(self.h5_data_regular["shot_stake"], query_idx)
-        rl_q = self._take_rows(self.h5_data_regular["recv_line"], query_idx)
-        rs_q = self._take_rows(self.h5_data_regular["recv_stake"], query_idx)
-        sl_c = self._take_rows(self.h5_data["shot_line"], context_idx)
-        ss_c = self._take_rows(self.h5_data["shot_stake"], context_idx)
-        rl_c = self._take_rows(self.h5_data["recv_line"], context_idx)
-        rs_c = self._take_rows(self.h5_data["recv_stake"], context_idx)
-        patch_info = {
-            "shot_line": np.concatenate([sl_q, sl_c])[_order],
-            "shot_stake": np.concatenate([ss_q, ss_c])[_order],
-            "recv_line": np.concatenate([rl_q, rl_c])[_order],
-            "recv_stake": np.concatenate([rs_q, rs_c])[_order],
-        }
+        patch_info = {}
+        for col in get_key_columns():
+            col_q = self._take_rows(self.h5_data_regular[col], query_idx)
+            col_c = self._take_rows(self.h5_data[col], context_idx)
+            patch_info[col] = np.concatenate([col_q, col_c])[_order]
         out = {
             "data": data_patch,
             "masked_patch": masked_patch,
@@ -861,20 +879,11 @@ class DatasetH5CSGCRG(DatasetH5_all_queryctx):
         )
 
         # ── patch_info (header fields: query from regular, context from raw) ──
-        sl_q = self._take_rows(self.h5_data_regular["shot_line"], query_idx)
-        ss_q = self._take_rows(self.h5_data_regular["shot_stake"], query_idx)
-        rl_q = self._take_rows(self.h5_data_regular["recv_line"], query_idx)
-        rs_q = self._take_rows(self.h5_data_regular["recv_stake"], query_idx)
-        sl_c = self._take_rows(self.h5_data["shot_line"], context_idx)
-        ss_c = self._take_rows(self.h5_data["shot_stake"], context_idx)
-        rl_c = self._take_rows(self.h5_data["recv_line"], context_idx)
-        rs_c = self._take_rows(self.h5_data["recv_stake"], context_idx)
-        patch_info = {
-            "shot_line": np.concatenate([sl_q, sl_c])[_order],
-            "shot_stake": np.concatenate([ss_q, ss_c])[_order],
-            "recv_line": np.concatenate([rl_q, rl_c])[_order],
-            "recv_stake": np.concatenate([rs_q, rs_c])[_order],
-        }
+        patch_info = {}
+        for col in get_key_columns():
+            col_q = self._take_rows(self.h5_data_regular[col], query_idx)
+            col_c = self._take_rows(self.h5_data[col], context_idx)
+            patch_info[col] = np.concatenate([col_q, col_c])[_order]
 
         out = {
             "data": data_patch,

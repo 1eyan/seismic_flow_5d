@@ -23,11 +23,17 @@ import segyio
 # Loaded from segy_config (YAML-based). To switch datasets:
 #     segy_config.load_config("field1031")   or   segy_config.load_config("segc3")
 try:
-    from ..config.segy_config import get_byte_pos, KEY_COLUMNS
+    from ..config.segy_config import (
+        get_byte_pos,
+        get_key_columns,
+        get_sort_keys,
+    )
 except ImportError:
-    from config.segy_config import get_byte_pos, KEY_COLUMNS
-
-SEGY_BYTE_POS = get_byte_pos()
+    from config.segy_config import (
+        get_byte_pos,
+        get_key_columns,
+        get_sort_keys,
+    )
 
 
 def i32be(buf: bytes, pos_1b: int) -> int:
@@ -61,6 +67,9 @@ def read_segy_headers(path: str, mode: str = "fixed") -> List[dict]:
     Returns:
         List of header dicts with keys: trace_idx, key, coords, ns.
     """
+    byte_pos = get_byte_pos()
+    key_columns = get_key_columns()
+
     headers = []
     with open(path, "rb") as f:
         f.seek(3200)
@@ -73,16 +82,13 @@ def read_segy_headers(path: str, mode: str = "fixed") -> List[dict]:
             hdr = f.read(240)
             if len(hdr) < 240:
                 break
-            sx = i32be(hdr, SEGY_BYTE_POS["shot_x"])
-            sy = i32be(hdr, SEGY_BYTE_POS["shot_y"])
-            rx = i32be(hdr, SEGY_BYTE_POS["rec_x"])
-            ry = i32be(hdr, SEGY_BYTE_POS["rec_y"])
+            sx = i32be(hdr, byte_pos["shot_x"])
+            sy = i32be(hdr, byte_pos["shot_y"])
+            rx = i32be(hdr, byte_pos["rec_x"])
+            ry = i32be(hdr, byte_pos["rec_y"])
             if mode == "fixed":
-                key = (
-                    i32be(hdr, SEGY_BYTE_POS["shot_line"]),
-                    i32be(hdr, SEGY_BYTE_POS["shot_no"]),
-                    i32be(hdr, SEGY_BYTE_POS["recv_line"]),
-                    i32be(hdr, SEGY_BYTE_POS["recv_no"]),
+                key = tuple(
+                    i32be(hdr, byte_pos[col]) for col in key_columns
                 )
             else:
                 scalar_raw = struct.unpack(">h", hdr[119:121])[0]
@@ -129,6 +135,64 @@ def write_segy_data(template_path: str, output_path: str, data: np.ndarray) -> N
             )
         for i in range(f.tracecount):
             f.trace[i] = data[i].astype(np.float32)
+
+
+def sort_output_segy(
+    input_path: str,
+    output_path: str,
+    sort_keys: List[str] = None,
+) -> None:
+    """Sort a SEG-Y file by the given header keys in-place.
+
+    Args:
+        input_path: source SEG-Y file.
+        output_path: sorted output SEG-Y file (can be same as input).
+        sort_keys: list of header field names to sort by (lexicographic).
+                   Default: ["recv_line", "recv_stake", "shot_line", "shot_stake"].
+    """
+    sort_keys = get_sort_keys() if sort_keys is None else list(sort_keys)
+
+    headers = read_segy_headers(input_path, mode="fixed")
+    data = read_segy_data(input_path)
+    n_traces, n_samples = data.shape
+
+    # Build sort columns from header keys
+    key_map = {
+        "shot_line": "key",  # key[0]
+        "shot_stake": "key",  # key[1]
+        "recv_line": "key",  # key[2]
+        "recv_stake": "key",  # key[3]
+    }
+    _key_cols = get_key_columns()
+    cols = []
+    for sk in reversed(sort_keys):
+        if sk in key_map:
+            idx = _key_cols.index(sk)
+            col = np.array([h["key"][idx] for h in headers], dtype=np.int64)
+        else:
+            raise ValueError(f"unknown sort key: {sk!r}")
+        cols.append(col)
+
+    order = np.lexsort(cols)
+    sorted_data = data[order].astype(np.float32)
+
+    # Read raw trace headers from input, then write sorted
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    if output_path != input_path:
+        shutil.copy2(input_path, output_path)
+
+    # Snapshot all headers before mutating (avoids in-place overwrite issues)
+    with segyio.open(input_path, "r", strict=False, ignore_geometry=True) as f_src:
+        all_headers = [dict(f_src.header[i]) for i in range(n_traces)]
+
+    with segyio.open(output_path, "r+", strict=False, ignore_geometry=True) as f:
+        if f.tracecount != n_traces:
+            raise ValueError(
+                f"SEGY tracecount={f.tracecount}, data traces={n_traces}"
+            )
+        for new_idx, old_idx in enumerate(order):
+            f.trace[new_idx] = sorted_data[new_idx]
+            f.header[new_idx].update(all_headers[old_idx])
 
 
 def build_lookup(

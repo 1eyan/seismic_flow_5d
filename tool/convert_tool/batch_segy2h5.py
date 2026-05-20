@@ -25,7 +25,7 @@ import h5py as h5
 import numpy as np
 
 import dataset_config
-from Segy2H5 import organize_traces, compute_ovt_fields, SORT_KEYS
+from Segy2H5 import organize_traces, compute_ovt_fields
 
 # Allow import from project root (Segy2H5 already adds _PROJ_ROOT to sys.path)
 try:
@@ -111,7 +111,7 @@ def _worker(chunk, temp_h5, worker_id, compute_ovt,
             print(f"  [Worker {worker_id}] ({i}/{n}) {group_name}: {input_segy}", flush=True)
 
             block = organize_traces(input_segy, headers_df=None,
-                                    sort_keys=SORT_KEYS, mode='fixed')
+                                    sort_keys=None, mode='fixed')
 
             write_group(temp_h5, group_name, block,
                         compute_ovt=compute_ovt,
