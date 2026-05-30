@@ -179,6 +179,8 @@ def run_queryctx_inference(
     logger=None,
     rank: int = 0,
     world_size: int = 1,
+    flush_callback=None,
+    flush_interval: int = 0,
 ) -> Tuple[Dict, Dict, Dict[str, Any]]:
     """Run inference on a DatasetH5_all_queryctx in inference mode.
 
@@ -220,6 +222,7 @@ def run_queryctx_inference(
         vis_path = Path(vis_dir)
         vis_path.mkdir(parents=True, exist_ok=True)
     vis_limit = vis_max if vis_max > 0 else float("inf")
+    _flush_count = 0
 
     all_indices = list(range(len(dataset)))
     # DDP: each rank processes only its shard
@@ -292,7 +295,7 @@ def run_queryctx_inference(
         return x_batch, c_batch, scales, valid, meta_list
 
     def _flush():
-        nonlocal total_missing, total_traces, pred_sum, pred_count
+        nonlocal total_missing, total_traces, pred_sum, pred_count, _flush_count
 
         if not sample_buf:
             return
@@ -345,8 +348,15 @@ def run_queryctx_inference(
                     add_prediction(pred_sum, pred_count, key, pred_b[j])
 
         sample_buf.clear()
+        _flush_count += 1
+        if (
+            flush_callback is not None
+            and flush_interval > 0
+            and _flush_count % flush_interval == 0
+        ):
+            flush_callback(pred_sum, pred_count, _flush_count)
 
-    
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
@@ -362,6 +372,9 @@ def run_queryctx_inference(
             iterator.set_postfix(sample=idx, traces=n_tr, missing=int(is_query.sum()))
 
     _flush()  # remaining
+
+    if flush_callback is not None and flush_interval > 0:
+        flush_callback(pred_sum, pred_count, _flush_count)
 
     if device.type == "cuda":
         torch.cuda.synchronize()

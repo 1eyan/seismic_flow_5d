@@ -137,6 +137,36 @@ def write_segy_data(template_path: str, output_path: str, data: np.ndarray) -> N
             f.trace[i] = data[i].astype(np.float32)
 
 
+def write_segy_data_incremental(
+    output_path: str,
+    trace_indices: np.ndarray,
+    trace_data: np.ndarray,
+) -> None:
+    """Overwrite specific traces in an existing SEG-Y file (``r+`` mode).
+
+    The file at *output_path* must already exist and have at least
+    ``max(trace_indices)+1`` traces.  No ``shutil.copy2`` is performed.
+
+    Args:
+        output_path: path to an existing SEG-Y file.
+        trace_indices: 1-D array of 0-based trace indices to overwrite.
+        trace_data: (N, T) float32 array, N == len(trace_indices).
+    """
+    trace_data = np.asarray(trace_data, dtype=np.float32)
+    trace_indices = np.asarray(trace_indices, dtype=np.intp)
+    if trace_data.ndim == 1:
+        trace_data = trace_data.reshape(1, -1)
+
+    with segyio.open(output_path, "r+", strict=False, ignore_geometry=True) as f:
+        if f.tracecount < trace_indices.max() + 1:
+            raise ValueError(
+                f"SEGY tracecount={f.tracecount} < required "
+                f"{trace_indices.max() + 1}"
+            )
+        for i, idx in enumerate(trace_indices):
+            f.trace[idx] = trace_data[i]
+
+
 def sort_output_segy(
     input_path: str,
     output_path: str,

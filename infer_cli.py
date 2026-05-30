@@ -47,6 +47,7 @@ from utils import (
     read_segy_headers,
     read_segy_data,
     write_segy_data,
+    write_segy_data_incremental,
     build_lookup,
     sort_output_segy,
 )
@@ -171,6 +172,61 @@ def save_reports(output_dir: Path, headers, written, unfilled, still_missing,
         writer.writerows(unmatched)
 
 
+def _make_periodic_fill_callback(
+    output_segy: str,
+    mask_path: str,
+    mask_data: np.ndarray,
+    headers: list,
+    missing_global: np.ndarray,
+    time_ps: int,
+    logger: logging.Logger,
+):
+    """Return a closure that checkpoints current predictions into *output_segy*.
+
+    First invocation copies *mask_path* → *output_segy* (template).
+    Subsequent ones open the existing file in ``r+`` and write only traces
+    that are marked missing and have accumulated predictions.
+
+    Signature ``(pred_sum, pred_count, flush_count)`` matches the
+    ``flush_callback`` expected by ``run_queryctx_inference``.
+    """
+    import shutil as _shutil
+    from pathlib import Path as _Path
+
+    lookup = build_lookup(headers)
+    out = mask_data.copy()
+    ns = mask_data.shape[1]
+    _initialized = False
+
+    def _callback(pred_sum, pred_count, flush_count):
+        nonlocal _initialized
+
+        if not _initialized:
+            _Path(output_segy).parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copy2(mask_path, output_segy)
+            _initialized = True
+
+        seen: dict = {}
+        for key, total in pred_sum.items():
+            for trace_idx in lookup.get(key, []):
+                if missing_global[trace_idx]:
+                    avg = total / max(pred_count[key], 1)
+                    trace = fit_trace(avg, ns, time_ps=time_ps)
+                    out[trace_idx] = trace
+                    seen[trace_idx] = trace
+
+        if seen:
+            write_segy_data_incremental(
+                output_segy,
+                np.array(list(seen.keys()), dtype=np.intp),
+                np.array(list(seen.values()), dtype=np.float32),
+            )
+        logger.info("periodic fill [flush %d]: wrote %d traces to %s",
+                     flush_count, len(seen), output_segy)
+
+    return _callback
+
+
 def fill_segy(args, headers, missing_global, pred_sum, pred_count, logger,
               label_data=None, time_ps: int = None) -> dict:
     mask_data = read_segy_data(args.mask_path)
@@ -279,6 +335,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch_size", type=int, default=6)
+    parser.add_argument("--fill_interval", type=int, default=0,
+                        help="Periodic SEGY checkpoint every N batch flushes "
+                             "(0=disabled). Only rank 0 writes in DDP mode.")
     parser.add_argument("--time_ps", type=int, default=1256)
     parser.add_argument("--trace_ps", type=int, default=128)
     parser.add_argument("--missing_eps", type=float, default=1e-10)
@@ -344,13 +403,20 @@ def main() -> None:
         logger.info("world_size=%d", world_size)
         print_segy_config()
 
-    # Cleanup stale .rank_results from previous crashed run (all ranks)
-    _stale_dir = Path(args.output_dir) / ".rank_results"
-    if _stale_dir.exists():
+    # Compute shared temp directory for cross-rank result exchange.
+    # Uses local storage (typically /tmp) rather than output_dir to avoid
+    # NFS I/O pressure from 8 concurrent writers.
+    import hashlib as _hashlib
+    import tempfile as _tempfile
+    _RANK_TMP = Path(_tempfile.gettempdir()) / (
+        "infer_merge_" + _hashlib.md5(args.output_dir.encode()).hexdigest()[:12]
+    )
+    # Cleanup stale temp dir from previous crashed run (all ranks)
+    if _RANK_TMP.exists():
         import shutil as _shutil
         if is_main:
-            logger.info("cleaning up stale rank results: %s", _stale_dir)
-        _shutil.rmtree(_stale_dir, ignore_errors=True)
+            logger.info("cleaning up stale rank results: %s", _RANK_TMP)
+        _shutil.rmtree(_RANK_TMP, ignore_errors=True)
 
     total_start = time.perf_counter()
 
@@ -458,6 +524,19 @@ def main() -> None:
         sde_num_steps=args.sde_num_steps,
     ).eval()
 
+    # ---- Periodic fill callback (optional) ----
+    fill_callback = None
+    if is_main and args.fill_interval > 0:
+        fill_callback = _make_periodic_fill_callback(
+            output_segy=args.output_segy,
+            mask_path=args.mask_path,
+            mask_data=mask_data,
+            headers=headers,
+            missing_global=missing_global,
+            time_ps=time_ps,
+            logger=logger,
+        )
+
     # ---- Inference ----
     pred_sum, pred_count, inference_seconds, infer_stats = run_queryctx_inference(
         dataset=dataset,
@@ -471,6 +550,8 @@ def main() -> None:
         logger=logger,
         rank=rank,
         world_size=world_size,
+        flush_callback=fill_callback,
+        flush_interval=args.fill_interval,
     )
 
     # ---- DDP gather via file-based merge (avoids NCCL timeout) ----
@@ -479,35 +560,36 @@ def main() -> None:
         import time as _time
         import shutil as _shutil
 
-        _rank_base = Path(args.output_dir) / ".rank_results"
-        _rank_dir = _rank_base / f"rank_{rank}"
+        _rank_dir = _RANK_TMP / f"rank_{rank}"
         _rank_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save pred_sum: store arrays in npz (keyed by index) + tuple keys via pickle
+        # Save pred_sum: store arrays in npz (keyed by index) + tuple keys via pickle.
+        # Use np.savez (uncompressed) -- compression gains ~0 on per-trace arrays
+        # and adds CPU overhead. Data is read immediately on the same machine.
         _r_keys = list(pred_sum.keys())
         with open(_rank_dir / "pred_keys.pkl", "wb") as _f:
             _pickle.dump(_r_keys, _f, protocol=_pickle.HIGHEST_PROTOCOL)
         _npz_dict = {f"arr_{i}": pred_sum[k] for i, k in enumerate(_r_keys)}
-        np.savez_compressed(_rank_dir / "pred_sum.npz", **_npz_dict)
+        np.savez(_rank_dir / "pred_sum.npz", **_npz_dict)
         # Save pred_count with stringified keys (JSON-compatible)
         _r_count = {"__".join(map(str, k)): int(v) for k, v in pred_count.items()}
         with open(_rank_dir / "pred_count.json", "w") as _f:
             json.dump(_r_count, _f)
 
         # File-based barrier: each rank signals completion by touching a done file
-        (_rank_base / f".rank_{rank}_done").touch()
+        (_RANK_TMP / f".rank_{rank}_done").touch()
 
         if is_main:
             _max_wait = 86400  # 24h timeout for file barrier
-            logger.info("waiting for all ranks to finish inference (file barrier, timeout=%dh)...",
-                        _max_wait // 3600)
+            logger.info("waiting for all ranks to finish inference (file barrier, timeout=%d h, tmp=%s)...",
+                        _max_wait // 3600, _RANK_TMP)
             _waited = 0
             _pending = set(range(world_size))
             while _pending:
                 _time.sleep(2)
                 _waited += 2
                 _pending = {r for r in _pending
-                            if not (_rank_base / f".rank_{r}_done").exists()}
+                            if not (_RANK_TMP / f".rank_{r}_done").exists()}
                 if _waited % 60 == 0:
                     logger.info("still waiting for ranks %s (%.0f s elapsed)...",
                                 sorted(_pending), _waited)
@@ -522,7 +604,7 @@ def main() -> None:
 
             merged_sum, merged_count = {}, defaultdict(int)
             for r in range(world_size):
-                _rd = _rank_base / f"rank_{r}"
+                _rd = _RANK_TMP / f"rank_{r}"
                 # Load pred_sum arrays + keys
                 with open(_rd / "pred_keys.pkl", "rb") as _f:
                     _r_keys = _pickle.load(_f)
@@ -542,7 +624,7 @@ def main() -> None:
 
             pred_sum, pred_count = merged_sum, merged_count
             # Cleanup temp files
-            _shutil.rmtree(_rank_base)
+            _shutil.rmtree(_RANK_TMP)
             logger.info("merge complete: %d unique keys", len(pred_sum))
 
     # ---- SEGY fill ----

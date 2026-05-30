@@ -58,6 +58,57 @@ sw06:
   coord_col: {"sx": 0, "sy": 1, "rx": 2, "ry": 3}
   metric_weights: [1.0, 1.0, 0.5, 0.5]
 
+# A002 field dataset (KN model format).
+# Byte positions from knmodel_header.json (non-standard layout).
+a002:
+  byte_pos:
+    shot_line: 137
+    shot_no: 237
+    recv_line: 171
+    recv_no: 233
+    shot_stake: 197       # sp_point (not the double at 141)
+    recv_stake: 175       # gp_point
+    offset: 37
+    cmp: 193
+    cmp_line: 189
+    shot_x: 61            # float32 sp_x — needs scalar correction
+    shot_y: 65            # float32 sp_y
+    rec_x: 127            # float32 gp_x
+    rec_y: 131            # float32 gp_y
+    shot_x_grid: 73       # int32 sp_east — grid coords, no scalar
+    shot_y_grid: 77       # int32 sp_north
+    rec_x_grid: 81        # int32 gp_east
+    rec_y_grid: 85        # int32 gp_north
+    t0: 109               # delrt
+    dt: 117
+    scalar: 69            # scalel
+  thdef_types:
+    shot_line: i
+    shot_no: i
+    recv_line: i
+    recv_no: i
+    shot_stake: i
+    recv_stake: i
+    offset: i
+    cmp: i
+    cmp_line: i
+    shot_x: f
+    shot_y: f
+    rec_x: f
+    rec_y: f
+    shot_x_grid: i
+    shot_y_grid: i
+    rec_x_grid: i
+    rec_y_grid: i
+    t0: h
+    dt: H
+    scalar: h
+  key_columns: ["shot_line", "shot_stake", "recv_line", "recv_stake"]
+  sort_keys: ["shot_line", "shot_stake", "recv_line", "recv_stake"]
+  trace_sort_keys: ["rx", "ry", "sx", "sy"]
+  coord_col: {"sx": 0, "sy": 1, "rx": 2, "ry": 3}
+  metric_weights: [1.0, 1.0, 0.5, 0.5]
+
 # Self-computed mode (coordinate-only, for segc3 data series)
 # In this mode, shot_line/shot_stake/recv_line/recv_stake are not read
 # from headers but computed from scaled coordinates.

@@ -9,12 +9,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
 # ---- GPU ----
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
-NUM_GPUS="${NUM_GPUS:-8}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,5,6,7}"
+NUM_GPUS="${NUM_GPUS:-7}"
 MASTER_PORT="${MASTER_PORT:-29502}"
 
 # ---- Model checkpoint ----
-CHECKPOINT="${CHECKPOINT:-/data/shared/测试数据/h5/model-20.pth}"
+CHECKPOINT="${CHECKPOINT:-/home/chengzhitong/5d_regular/seismic_transformer_5d/resultsFPM/trace_axis_datatype_df_field1031_5d_queryctx/checkpoints/model-30.pth}"
 
 # ---- Data ----
 H5_DIR="${H5_DIR:-/data/shared/测试数据/h5}"
@@ -22,17 +22,18 @@ H5_IRREGULAR="${H5_IRREGULAR:-${H5_DIR}/field1031_irregular.h5}"
 H5_REGULAR="${H5_REGULAR:-${H5_DIR}/field1031_label.h5}"
 H5_MASK="${H5_MASK:-${H5_DIR}/field1031_mask.h5}"
 MASK_SEGY="${MASK_SEGY:-/data/shared/测试数据/mask_from_label.sgy}"
-DATASET_NEIGHBORS_INFER="${DATASET_NEIGHBORS_INFER:-${H5_DIR}/patchV4/infer_query_context.npz}"
+DATASET_NEIGHBORS_INFER="${DATASET_NEIGHBORS_INFER:-${H5_DIR}/anchor_patch_v2/infer_query_context.npz}"
 LABEL_SEGY="${LABEL_SEGY:-}"
 
 # ---- Output ----
-OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/gen_fill_results_v2}"
+OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/gen_fill_results_v3}"
 OUTPUT_SEGY="${OUTPUT_SEGY:-${OUTPUT_DIR}/filled_missing.sgy}"
 OUTPUT_RESIDUAL_SEGY="${OUTPUT_RESIDUAL_SEGY:-${OUTPUT_DIR}/residual.sgy}"
 
 # ---- Inference params ----
 DEVICE="${DEVICE:-cuda:0}"
 BATCH_SIZE="${BATCH_SIZE:-18}"
+FILL_INTERVAL="${FILL_INTERVAL:-1}"
 TIME_PS="${TIME_PS:-1256}"
 TRACE_PS="${TRACE_PS:-128}"
 HEADER_MODE="${HEADER_MODE:-fixed}"
@@ -71,6 +72,7 @@ shared_args=(
   --output_segy "${OUTPUT_SEGY}"
   --output_residual_segy "${OUTPUT_RESIDUAL_SEGY}"
   --batch_size "${BATCH_SIZE}"
+  --fill_interval "${FILL_INTERVAL}"
   --time_ps "${TIME_PS}"
   --trace_ps "${TRACE_PS}"
   --header_mode "${HEADER_MODE}"
@@ -110,6 +112,7 @@ echo "neighbors_npz: ${DATASET_NEIGHBORS_INFER}"
 echo "output_segy:   ${OUTPUT_SEGY}"
 echo "device:        ${DEVICE}"
 echo "batch_size:    ${BATCH_SIZE}"
+echo "fill_interval: ${FILL_INTERVAL}"
 echo "phys_omega:    ${USE_PHYS_OMEGA}"
 echo "visualize:     ${VISUALIZE}"
 echo "segy_config:   ${SEGY_CONFIG}"

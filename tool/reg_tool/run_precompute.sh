@@ -19,7 +19,7 @@ REGULAR_H5="${REGULAR_H5:-${BASE_DIR}/field1031_label.h5}"
 TARGET_H5="${TARGET_H5:-${BASE_DIR}/field1031_mask.h5}"
 GROUP_KEY="${GROUP_KEY:-1551}"
 GROUP_KEY="${GROUP_KEY:-1551}"
-PATCH_DIR="${PATCH_DIR:-${BASE_DIR}/anchor_patch_v2}"
+PATCH_DIR="${PATCH_DIR:-${BASE_DIR}/anchor_patch_v3}"
 
 # ── 训练参数 ──────────────────────────────────────────────────
 NUM_ANCHORS="${NUM_ANCHORS:-7896}"
@@ -36,10 +36,10 @@ TRAIN_TRUSTED_SOURCE="${TRAIN_TRUSTED_SOURCE:-all}"
 # ── 推理参数 ──────────────────────────────────────────────────
 BLOCK_DIVISORS="${BLOCK_DIVISORS:-6,21,7,5}"
 STRIDE_DIVISORS="${STRIDE_DIVISORS:-6,21,7,5}"
-QUERY_MASK_MODE="${QUERY_MASK_MODE:-regular_true}"
-MAX_QUERY_PER_PATCH="${MAX_QUERY_PER_PATCH:-128}"
-INFER_GPU_DEVICE="${INFER_GPU_DEVICE:-cuda:5}"
-GPU_QUERY_CHUNK_SIZE="${GPU_QUERY_CHUNK_SIZE:-128}"
+QUERY_MASK_MODE="${QUERY_MASK_MODE:-regular_false}"
+MAX_QUERY_PER_PATCH="${MAX_QUERY_PER_PATCH:-64}"
+INFER_GPU_DEVICE="${INFER_GPU_DEVICE:-cuda:4}"
+GPU_QUERY_CHUNK_SIZE="${GPU_QUERY_CHUNK_SIZE:-64}"
 
 # ── 拆分逗号分隔的多值参数 ────────────────────────────────────
 IFS=',' read -ra _block_divs  <<< "${BLOCK_DIVISORS}"
@@ -68,7 +68,7 @@ ARGS=(
     --gpu-query-chunk-size  "${GPU_QUERY_CHUNK_SIZE}"
     --infer-gpu-device      "${INFER_GPU_DEVICE}"
     --no-infer-use-gpu
-    --skip-infer
+    --skip-train
 )
 
 [[ -n "${NUM_ANCHORS}" ]] && ARGS+=(--num-anchors "${NUM_ANCHORS}")

@@ -63,6 +63,7 @@ _PRESETS: Dict[str, dict] = _load_yaml()
 
 _active_name: str = ""
 _active_byte_pos: Dict[str, int] = {}
+_active_thdef_types: Dict[str, str] = {}
 _active_key_columns: Tuple[str, ...] = ()
 _active_sort_keys: List[str] = []
 _active_trace_sort_keys: Tuple[str, ...] = ()
@@ -114,6 +115,7 @@ def _extract_preset_fields(preset: dict) -> dict:
     if "byte_pos" in preset:
         return {
             "byte_pos": dict(preset["byte_pos"]),
+            "thdef_types": dict(preset.get("thdef_types", {})),
             "key_columns": tuple(preset.get("key_columns", KEY_COLUMNS)),
             "sort_keys": list(preset.get("sort_keys", SORT_KEYS)),
             "trace_sort_keys": tuple(preset.get("trace_sort_keys", TRACE_SORT_KEYS)),
@@ -123,6 +125,7 @@ def _extract_preset_fields(preset: dict) -> dict:
     # Old flat format: entire dict is byte_pos
     return {
         "byte_pos": {k: int(v) for k, v in preset.items() if isinstance(v, (int, float))},
+        "thdef_types": {},
         "key_columns": KEY_COLUMNS,
         "sort_keys": list(SORT_KEYS),
         "trace_sort_keys": TRACE_SORT_KEYS,
@@ -133,13 +136,14 @@ def _extract_preset_fields(preset: dict) -> dict:
 
 def _set_active(name: str, fields: dict) -> None:
     """Set all active state from extracted preset fields."""
-    global _active_name, _active_byte_pos, _active_key_columns
-    global _active_sort_keys, _active_trace_sort_keys, _active_coord_col
-    global _active_metric_weights
+    global _active_name, _active_byte_pos, _active_thdef_types
+    global _active_key_columns, _active_sort_keys, _active_trace_sort_keys
+    global _active_coord_col, _active_metric_weights
     global KEY_COLUMNS, SORT_KEYS, TRACE_SORT_KEYS, COORD_COL, METRIC_WEIGHTS
 
     _active_name = name
     _active_byte_pos = fields["byte_pos"]
+    _active_thdef_types = fields["thdef_types"]
     _active_key_columns = fields["key_columns"]
     _active_sort_keys = fields["sort_keys"]
     _active_trace_sort_keys = fields["trace_sort_keys"]
@@ -208,6 +212,11 @@ def get_byte_pos() -> Dict[str, int]:
     return dict(_active_byte_pos)
 
 
+def get_thdef_types() -> Dict[str, str]:
+    """Return a copy of the active seisio thdef type mapping."""
+    return dict(_active_thdef_types)
+
+
 def get_key_columns() -> Tuple[str, ...]:
     """Return the active key-columns tuple (trace identity fields)."""
     return _active_key_columns
@@ -256,3 +265,5 @@ def print_info() -> None:
     print(f"[segy_config] coord_col:        {_active_coord_col}")
     print(f"[segy_config] metric_weights:   {_active_metric_weights}")
     print(f"[segy_config] byte positions:   {_active_byte_pos}")
+    if _active_thdef_types:
+        print(f"[segy_config] thdef types:     {_active_thdef_types}")
